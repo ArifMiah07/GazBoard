@@ -2284,6 +2284,83 @@ async function run(win, app) {
   check('you cannot pan away from the paper until it is off screen', padCam.paperStillOnScreen === true);
   check('an infinite board is still free to roam', padCam.infiniteStillFree === true);
 
+  /* ---- writing on imported pages stays cheap ---- *
+   * Every pointer move used to repaint the whole board, page bitmaps and all.
+   * With a document imported across many sheets that is a lot of redrawing for
+   * ink that only touches one of them, and it showed as flicker. The scene is
+   * now frozen for the duration of a stroke.
+   */
+  const inkCache = await js(`
+    const a = window.app;
+    const { pageRects } = await import('app://board/js/core/pages.js');
+    const r = {};
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    for (let i = 1; i < 8; i++) a.addPage();
+    const rects = pageRects(a.pages);
+    // a page-sized bitmap on every sheet, the shape of an imported document
+    const px = document.createElement('canvas'); px.width = 600; px.height = 850;
+    const pc = px.getContext('2d'); pc.fillStyle = '#eee'; pc.fillRect(0, 0, 600, 850);
+    const url = px.toDataURL('image/png');
+    rects.forEach((q, i) => a.store.add({ id: 'doc' + i, type: 'image', kind: 'page',
+      x: q.x + 20, y: q.y + 20, w: q.w - 40, h: q.h - 40, rotation: 0, src: url, name: 'doc' }, 'x'));
+    await new Promise(res => setTimeout(res, 400));
+
+    const sf = a.surface, inter = a.interaction, cam = sf.cam;
+    a.goToPage(4);
+    await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
+    const rm = rects[4];
+    const scr = (w) => ({ x: w.x * cam.z + cam.x, y: w.y * cam.z + cam.y });
+
+    let froze = 0;
+    const real = sf._freezeScene.bind(sf);
+    sf._freezeScene = function (k) { froze++; return real(k); };
+
+    // one stroke of 50 moves must freeze the scene once, not fifty times
+    inter.startStroke({ pointerType: 'pen', pressure: .6 }, { x: rm.x + 60, y: rm.y + 300 }, 'pen');
+    for (let i = 1; i <= 50; i++) {
+      inter.applyMotion(scr({ x: rm.x + 60 + i * 10, y: rm.y + 300 }), {}, null);
+      sf.draw();
+    }
+    r.freezesForOneStroke = froze;
+    r.cachedMidStroke = !!sf._ink;
+
+    // the freeze must drop when the camera moves under the pen, or the board
+    // would appear to stick while auto-pan scrolled it
+    cam.panBy(-40, 0);
+    sf.draw();
+    r.refrozeAfterPan = froze === 2;
+
+    // and when the document changes beneath it
+    a.store.add({ id: 'newthing', type: 'shape', kind: 'rect', x: rm.x + 100, y: rm.y + 100,
+                  w: 80, h: 80, rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 }, 'x');
+    sf.draw();
+    r.refrozeAfterEdit = froze === 3;
+
+    if (inter.action) { inter.finishStroke(inter.action); inter.action = null; }
+    sf.draw();
+    r.cacheDroppedWhenPenLifts = sf._ink === null;
+    sf._freezeScene = real;
+
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  const ctxFlags = await js(`
+    const a = window.app;
+    const attrs = a.surface.ctx.getContextAttributes ? a.surface.ctx.getContextAttributes() : {};
+    return { desynchronized: !!attrs.desynchronized, alpha: !!attrs.alpha,
+             setting: a.settings.lowLatencyInk };
+  `);
+  check('the canvas is double-buffered unless low-latency inking is asked for',
+    ctxFlags.desynchronized === false && ctxFlags.setting === false && ctxFlags.alpha === false,
+    JSON.stringify(ctxFlags));
+
+  check('a stroke freezes the board once, however many times the pen moves',
+    inkCache.freezesForOneStroke === 1 && inkCache.cachedMidStroke === true, JSON.stringify(inkCache));
+  check('the frozen board is redrawn when the camera moves under the pen', inkCache.refrozeAfterPan === true);
+  check('and when the document changes beneath it', inkCache.refrozeAfterEdit === true);
+  check('lifting the pen drops the frozen copy', inkCache.cacheDroppedWhenPenLifts === true);
+
   /* ---- a pad exports as a real multi-page PDF ---- */
   const padPdfPath = path.join(OUT, 'pad-3-pages.pdf');
   const padPdf = await js(`

@@ -220,6 +220,8 @@ export function createPanels(app) {
           row('Auto-pan at the edges', mkToggle(() => s.edgePan, (v) => (s.edgePan = v)),
             'While drawing or dragging, running the pointer into the edge of the window scrolls the canvas. A mouse button held down during a pen stroke drags the canvas too.'),
           row('Return to select after drawing', mkToggle(() => s.returnToSelect, (v) => (s.returnToSelect = v))),
+          row('Low-latency inking', mkToggle(() => s.lowLatencyInk, (v) => { s.lowLatencyInk = v; app.toast('Takes effect next time GazBoard opens'); }),
+            'Shaves a little lag off the pen by letting the canvas skip a buffering step. On some graphics drivers this makes the board flicker while you write or drag, especially with imported document pages on it — leave it off if you see that. Applies when the app is reopened.'),
           row('Autosave', mkToggle(() => s.autosave, (v) => (s.autosave = v)), 'Boards are stored locally on this computer.')
         ),
         h('div', { class: 'section' },

@@ -3,13 +3,24 @@
 import { Camera } from './camera.js';
 import { drawBackground, drawObject, drawSelection, drawMemberOutline, drawLockBadge, FONT } from './render.js';
 import { worldBounds, boundsOf } from './store.js';
-import { pageRects, pageIndexForBox, stripBounds } from './pages.js';
+import { pageRects, pageIndexForBox, pageIndexForBoxIn, stripBounds } from './pages.js';
 import { boxesIntersect } from './util.js';
 
 export class Surface {
-  constructor(canvas, store) {
+  /**
+   * @param {object} opts
+   * @param {boolean} opts.lowLatency  ask for a desynchronized ("low latency")
+   *   canvas. It shaves a little lag off the pen, but it hands the canvas to
+   *   the compositor without the usual double buffering, and on some Windows
+   *   graphics drivers - notably since the Chromium that came with Electron 43
+   *   - a board carrying several large page bitmaps blinks on every repaint.
+   *   A steady picture beats a few milliseconds, so this is off unless asked
+   *   for. It can only be set when the canvas is created, so changing it takes
+   *   effect the next time the app opens.
+   */
+  constructor(canvas, store, opts = {}) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: !!opts.lowLatency });
     this.store = store;
     this.cam = new Camera();
     this.dpr = Math.min(window.devicePixelRatio || 1, 2.5);
@@ -116,14 +127,12 @@ export class Surface {
   }
 
   /** CSS-pixel coordinates map 1:1 to the canvas after this. */
-  screenTransform() { this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0); }
+  screenTransform(ctx = this.ctx) { ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0); }
 
-  draw() {
-    const { ctx, cam } = this;
-    const w = this.width, h = this.height;
-    if (!w || !h) return;
-
-    this.screenTransform();
+  /** Background and every object, in world space. No selection chrome. */
+  drawScene(ctx, w = this.width, h = this.height, onload = () => this.invalidate()) {
+    const cam = this.cam;
+    this.screenTransform(ctx);
     const pages = this.store.doc.pages;
     drawBackground(ctx, this.store.doc.background, cam, w, h, pages);
 
@@ -132,7 +141,6 @@ export class Surface {
     const view = cam.viewport(w, h);
     const pad = 64 / cam.z;
     const vbox = { x: view.x - pad, y: view.y - pad, w: view.w + pad * 2, h: view.h + pad * 2 };
-    const onload = () => this.invalidate();
 
     const visible = [];
     for (const o of this.store.objects) {
@@ -143,44 +151,100 @@ export class Surface {
 
     if (!pages.length) {
       for (const o of visible) drawObject(ctx, o, onload);
-    } else {
-      // Each sheet clips its own contents, so ink can never spill into the
-      // gutter or onto a neighbouring page. Objects that belong to no sheet
-      // are legacy content from a board saved before clipping existed and the
-      // user chose to keep - they stay visible on the desk rather than
-      // vanishing, which is the whole point of having asked.
-      const rects = pageRects(pages);
-      const buckets = rects.map(() => []);
-      const loose = [];
-      for (const o of visible) {
-        const i = pageIndexForBox(pages, boundsOf(o));
-        if (i >= 0) buckets[i].push(o); else loose.push(o);
-      }
-      for (const o of loose) drawObject(ctx, o, onload);
-      for (let i = 0; i < rects.length; i++) {
-        if (!buckets[i].length) continue;
-        const r = rects[i];
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(r.x, r.y, r.w, r.h);
-        ctx.clip();
-        for (const o of buckets[i]) drawObject(ctx, o, onload);
-        ctx.restore();
-      }
+      return;
     }
 
+    // Each sheet clips its own contents, so ink can never spill into the
+    // gutter or onto a neighbouring page. Objects that belong to no sheet are
+    // content from a board saved before clipping existed that the user chose
+    // to keep - they stay visible on the desk rather than vanishing, which is
+    // the whole point of having asked.
+    const rects = pageRects(pages);
+    const buckets = rects.map(() => []);
+    const loose = [];
+    for (const o of visible) {
+      const i = pageIndexForBoxIn(rects, boundsOf(o));
+      if (i >= 0) buckets[i].push(o); else loose.push(o);
+    }
+    for (const o of loose) drawObject(ctx, o, onload);
+    for (let i = 0; i < rects.length; i++) {
+      if (!buckets[i].length) continue;
+      const r = rects[i];
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(r.x, r.y, r.w, r.h);
+      ctx.clip();
+      for (const o of buckets[i]) drawObject(ctx, o, onload);
+      ctx.restore();
+    }
+  }
+
+  /** Paint the scene into an offscreen buffer we can blit while inking. */
+  _freezeScene(key) {
+    const bw = Math.max(1, Math.round(this.width * this.dpr));
+    const bh = Math.max(1, Math.round(this.height * this.dpr));
+    let c = this._ink && this._ink.canvas;
+    if (!c || c.width !== bw || c.height !== bh) {
+      c = document.createElement('canvas');
+      c.width = bw; c.height = bh;
+    }
+    const g = c.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, bw, bh);
+    // an image that finishes decoding mid-stroke has to invalidate the freeze,
+    // or it would not appear until the pen lifted
+    this.drawScene(g, this.width, this.height, () => { this._ink = null; this.invalidate(); });
+    return { canvas: c, key };
+  }
+
+  /** The stroke under the pen, clipped to its own sheet. */
+  _drawWet(ctx) {
+    const cam = this.cam, pages = this.store.doc.pages;
+    ctx.setTransform(this.dpr * cam.z, 0, 0, this.dpr * cam.z, this.dpr * cam.x, this.dpr * cam.y);
+    const onload = () => this.invalidate();
+    const wi = pages.length ? pageIndexForBox(pages, boundsOf(this.wet)) : -1;
+    if (wi >= 0) {
+      const r = pageRects(pages)[wi];
+      ctx.save(); ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
+      drawObject(ctx, this.wet, onload);
+      ctx.restore();
+    } else drawObject(ctx, this.wet, onload);
+  }
+
+  /**
+   * Paint the board.
+   *
+   * While a stroke is in flight the rest of the board cannot change, so it is
+   * painted once into an offscreen canvas and blitted after that. Handwriting
+   * on an imported page used to repaint every page bitmap under the nib on
+   * every pointer move; now a stroke costs one blit and one polyline no matter
+   * how heavy the page beneath it is. The cache is keyed on the document
+   * revision, the camera and the buffer size, so anything that could change
+   * the picture drops it automatically.
+   */
+  draw() {
+    const { ctx, cam } = this;
+    const w = this.width, h = this.height;
+    if (!w || !h) return;
+
     if (this.wet) {
-      const wi = pages.length ? pageIndexForBox(pages, boundsOf(this.wet)) : -1;
-      if (wi >= 0) {
-        const r = pageRects(pages)[wi];
-        ctx.save(); ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
-        drawObject(ctx, this.wet, onload);
-        ctx.restore();
-      } else drawObject(ctx, this.wet, onload);
+      const key = `${this.store.rev}|${cam.x}|${cam.y}|${cam.z}|${w}|${h}|${this.dpr}`;
+      if (!this._ink || this._ink.key !== key) this._ink = this._freezeScene(key);
+      this.screenTransform();
+      ctx.drawImage(this._ink.canvas, 0, 0, w, h);
+      this._drawWet(ctx);
+    } else {
+      this._ink = null;
+      this.drawScene(ctx, w, h);
     }
 
     // ---- screen-space overlays (CSS pixels) ----
+    // Never cached: selection handles, hover and lock badges have to track the
+    // pointer, and they are cheap.
     this.screenTransform();
+    const view = cam.viewport(w, h);
+    const pad = 64 / cam.z;
+    const vbox = { x: view.x - pad, y: view.y - pad, w: view.w + pad * 2, h: view.h + pad * 2 };
 
     if (this.hoverId && !this.selection.has(this.hoverId)) {
       const o = this.store.get(this.hoverId);
@@ -252,7 +316,7 @@ export class Surface {
       if (!boxesIntersect(box, worldBounds(o))) continue;
       // an export has to clip exactly as the screen does, or a stroke that
       // runs off the paper would reappear in the PDF
-      const i = rects.length ? pageIndexForBox(pages, boundsOf(o)) : -1;
+      const i = rects.length ? pageIndexForBoxIn(rects, boundsOf(o)) : -1;
       if (i >= 0) {
         const r = rects[i];
         ctx.save(); ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();

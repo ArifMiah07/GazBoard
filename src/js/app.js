@@ -28,7 +28,7 @@ const DEFAULT_SETTINGS = {
   textColor: '#201f1e', textSize: 32, textFont: 'hand',
   shapeKind: 'rect', shapeStroke: '#201f1e', shapeFill: 'none', shapeLineWidth: 3, shapeDash: null,
   inkToShape: false, pressure: true, wheelZoom: false, returnToSelect: true, autosave: true,
-  edgePan: true, importQuality: 2,
+  edgePan: true, importQuality: 2, lowLatencyInk: false,
   // 'auto' follows Whiteboard: the mouse inks until a stylus shows up, then it
   // becomes a pan-only device. 'yes' / 'no' pin it either way.
   inkWithMouse: 'auto', penSeen: false
@@ -37,8 +37,8 @@ const DEFAULT_SETTINGS = {
 class App {
   constructor() {
     this.store = new Store();
-    this.surface = new Surface(document.getElementById('c'), this.store);
     this.settings = this.loadSettings();
+    this.surface = new Surface(document.getElementById('c'), this.store, { lowLatency: !!this.settings.lowLatencyInk });
     this.tool = 'pen';
     this.clipboard = [];
     this.ruler = { visible: false, x: 0, y: 0, angle: 0, length: 900, thickness: 78, snap: true };

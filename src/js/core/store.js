@@ -33,6 +33,9 @@ export class Store {
     this._subs = new Set();
     this._opSubs = new Set();
     this._muted = 0;
+    // Bumped on every mutation. The renderer uses it to tell whether a cached
+    // frame is still good, which is cheaper and safer than comparing documents.
+    this.rev = 0;
     this.maxUndo = 200;
     this.maxLog = 5000;
   }
@@ -82,6 +85,7 @@ export class Store {
       case 'doc': Object.assign(d, op.after); break;
     }
     d.modified = Date.now();
+    this.rev++;
   }
 
   _invert(op) {
@@ -129,6 +133,7 @@ export class Store {
    * its result while it is in progress; the caller must rewind to the pristine
    * state and issue a real commit() when the gesture ends.               */
   rawInsert(obj, index) {
+    this.rev++;
     this.doc.objects[obj.id] = obj;
     if (index == null || index >= this.doc.order.length) this.doc.order.push(obj.id);
     else this.doc.order.splice(index, 0, obj.id);
@@ -136,6 +141,7 @@ export class Store {
   }
 
   rawRemove(id) {
+    this.rev++;
     delete this.doc.objects[id];
     const i = this.doc.order.indexOf(id);
     if (i >= 0) this.doc.order.splice(i, 1);
@@ -299,6 +305,7 @@ export class Store {
   /** Start a brand new empty document. */
   reset(name) {
     this.doc = emptyDoc(name);
+    this.rev++;
     this.undoStack.length = 0; this.redoStack.length = 0; this.log.length = 0;
     this.emit('load');
     return this.doc;
@@ -317,6 +324,7 @@ export class Store {
         : data.objects ? Object.values(data.objects) : [];
     for (const o of list) { d.objects[o.id] = o; d.order.push(o.id); }
     this.doc = d;
+    this.rev++;
     this.undoStack.length = 0; this.redoStack.length = 0; this.log.length = 0;
     this.emit('load');
   }

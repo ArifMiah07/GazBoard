@@ -58,7 +58,10 @@ export function pageRect(pages, cam) {
   return pageRects(pages, cam)[0] || null;
 }
 
-function drawPattern(ctx, bg, cam, w, h, anchor) {
+/** First grid line at or after `from`, on the lattice `origin + k*step`. */
+const lineFrom = (origin, step, from) => origin + Math.ceil((from - origin) / step) * step;
+
+function drawPattern(ctx, bg, cam, w, h, anchor, bounds) {
   const pattern = bg.pattern || 'none';
   if (pattern === 'none') return;
 
@@ -72,6 +75,15 @@ function drawPattern(ctx, bg, cam, w, h, anchor) {
   const oy = ((ay % step) + step) % step;
   const color = bg.patternColor || '#c8c6c4';
 
+  // Only sweep the part of the canvas this sheet actually covers. Running the
+  // full width and height once per sheet and leaning on the clip meant a pad
+  // paid for its whole ruling as many times as it had visible pages.
+  const x0 = bounds ? Math.max(0, bounds.x) : 0;
+  const y0 = bounds ? Math.max(0, bounds.y) : 0;
+  const x1 = bounds ? Math.min(w, bounds.x + bounds.w) : w;
+  const y1 = bounds ? Math.min(h, bounds.y + bounds.h) : h;
+  if (x1 <= x0 || y1 <= y0) return;
+
   ctx.save();
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
@@ -80,24 +92,25 @@ function drawPattern(ctx, bg, cam, w, h, anchor) {
   if (pattern === 'grid' || pattern === 'lines' || pattern === 'columns') {
     ctx.globalAlpha = 0.55;
     ctx.beginPath();
-    if (pattern !== 'lines') for (let x = ox; x < w; x += step) { ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, h); }
-    if (pattern !== 'columns') for (let y = oy; y < h; y += step) { ctx.moveTo(0, Math.round(y) + 0.5); ctx.lineTo(w, Math.round(y) + 0.5); }
+    if (pattern !== 'lines') for (let x = lineFrom(ox, step, x0); x < x1; x += step) { ctx.moveTo(Math.round(x) + 0.5, y0); ctx.lineTo(Math.round(x) + 0.5, y1); }
+    if (pattern !== 'columns') for (let y = lineFrom(oy, step, y0); y < y1; y += step) { ctx.moveTo(x0, Math.round(y) + 0.5); ctx.lineTo(x1, Math.round(y) + 0.5); }
     ctx.stroke();
   } else if (pattern === 'dots') {
     ctx.globalAlpha = 0.8;
     const r = clamp(step / 22, 0.8, 2.4);
-    for (let x = ox; x < w; x += step) for (let y = oy; y < h; y += step) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
+    for (let x = lineFrom(ox, step, x0); x < x1; x += step) for (let y = lineFrom(oy, step, y0); y < y1; y += step) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
   } else if (pattern === 'graph') {
     ctx.globalAlpha = 0.3;
     const small = step / 4;
+    const sox = ((ax % small) + small) % small, soy = ((ay % small) + small) % small;
     ctx.beginPath();
-    for (let x = ((ax % small) + small) % small; x < w; x += small) { ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, h); }
-    for (let y = ((ay % small) + small) % small; y < h; y += small) { ctx.moveTo(0, Math.round(y) + 0.5); ctx.lineTo(w, Math.round(y) + 0.5); }
+    for (let x = lineFrom(sox, small, x0); x < x1; x += small) { ctx.moveTo(Math.round(x) + 0.5, y0); ctx.lineTo(Math.round(x) + 0.5, y1); }
+    for (let y = lineFrom(soy, small, y0); y < y1; y += small) { ctx.moveTo(x0, Math.round(y) + 0.5); ctx.lineTo(x1, Math.round(y) + 0.5); }
     ctx.stroke();
     ctx.globalAlpha = 0.7;
     ctx.beginPath();
-    for (let x = ox; x < w; x += step) { ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, h); }
-    for (let y = oy; y < h; y += step) { ctx.moveTo(0, Math.round(y) + 0.5); ctx.lineTo(w, Math.round(y) + 0.5); }
+    for (let x = lineFrom(ox, step, x0); x < x1; x += step) { ctx.moveTo(Math.round(x) + 0.5, y0); ctx.lineTo(Math.round(x) + 0.5, y1); }
+    for (let y = lineFrom(oy, step, y0); y < y1; y += step) { ctx.moveTo(x0, Math.round(y) + 0.5); ctx.lineTo(x1, Math.round(y) + 0.5); }
     ctx.stroke();
   }
   ctx.restore();
@@ -139,7 +152,7 @@ export function drawBackground(ctx, bg, cam, w, h, pages = null) {
     ctx.beginPath();
     ctx.rect(sheet.x, sheet.y, sheet.w, sheet.h);
     ctx.clip();
-    drawPattern(ctx, bg, cam, w, h, { x: sheet.x, y: sheet.y });
+    drawPattern(ctx, bg, cam, w, h, { x: sheet.x, y: sheet.y }, sheet);
     ctx.restore();
 
     strokePageEdge(ctx, sheet);

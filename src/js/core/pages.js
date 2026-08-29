@@ -46,6 +46,22 @@ export function stripBounds(pages) {
 
 export const inRect = (r, x, y) => !!r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
 
+/* The `…In` variants take rectangles the caller already computed. The render
+ * loop asks which sheet an object is on once per object per frame, and on a
+ * pad of thirty imported pages rebuilding the whole strip for each of those
+ * questions is thirty times the work for the same answer. */
+
+/** Index of the sheet under a world point, given precomputed rects. */
+export function pageIndexAtIn(rects, x, y) {
+  for (let i = 0; i < rects.length; i++) if (inRect(rects[i], x, y)) return i;
+  return -1;
+}
+
+/** Index of the sheet a box belongs to, given precomputed rects. */
+export function pageIndexForBoxIn(rects, b) {
+  return b ? pageIndexAtIn(rects, b.x + b.w / 2, b.y + b.h / 2) : -1;
+}
+
 /** Index of the sheet under a world point, or -1 for the gutter. */
 export function pageIndexAt(pages, x, y) {
   const r = pageRects(pages);

@@ -264,7 +264,26 @@ end under `--force-device-scale-factor` at each of those scales.
 Screenshots and a results file are written to `test/out/`.
 
 ---
+## Screenshots
+![Annotating a lecture slide imported from PowerPoint](Screenshots/gazboardannotateslide.png)
 
+![Freeform canvas with imported reference images and multi-color ink](Screenshots/gazboardcanvas.png)
+
+![GazBoard desktop app — main window](Screenshots/gazboardhero.png)
+
+![Importing selected pages from a PowerPoint deck](Screenshots/gazboardimport.png)
+
+![Sticky notes for structuring a semester plan](Screenshots/gazboardnotes.png)
+
+![Exporting a board as a PDF](Screenshots/gazboardpdfexport.png)
+
+![Six pens, a highlighter, and pressure-sensitive ink with no smoothing](Screenshots/gazboardpens.png)
+
+![Shapes, arrows, and connected diagram nodes](Screenshots/gazboardshapes.png)
+
+![The MS Whiteboard–style pen tray toolbar](Screenshots/gazboardtoolbar.png)
+
+---
 ## Not included
 
 Everything in Microsoft Whiteboard 21.x that only exists because of the Microsoft account:

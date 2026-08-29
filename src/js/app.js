@@ -5,7 +5,8 @@ import { scaleObject, translateObject } from './core/transform.js';
 import { Surface } from './core/surface.js';
 import { Interaction } from './core/tools.js';
 import { pick } from './core/hit.js';
-import { uid, debounce, clamp } from './core/util.js';
+import { uid, debounce, clamp, unionBox } from './core/util.js';
+import { pageRects, stripBounds, pageIndexForBox, nearestPageIndex, offsetIntoRect, PAGE_GAP } from './core/pages.js';
 import { TextEditor } from './ui/textedit.js';
 import { initToolbar, syncToolbar } from './ui/toolbar.js';
 import { createPanels } from './ui/panels.js';
@@ -153,6 +154,10 @@ class App {
     const settle = () => {
       const sf = this.surface;
       if (!sf.width || !sf.height) { requestAnimationFrame(settle); return; }
+      // A pad that acquired its pages while this was waiting for the first
+      // layout gets fitted instead: 100% of an A4 sheet is a corner of a page,
+      // and landing there straight after choosing a paper size looks broken.
+      if (!focus && this.pageCount) { this.fitToPage(this.currentPageIndex()); return; }
       const view = sf.cam.viewport(sf.width, sf.height);
       const at = focus || { x: view.x + view.w / 2, y: view.y + view.h / 2 };
       sf.cam.z = 1;
@@ -190,7 +195,7 @@ class App {
     // than most windows, so you would open looking at a corner of it. Fit the
     // sheet instead, the way any document editor opens a page.
     if (opts.startup) {
-      if (this.store.doc.page) requestAnimationFrame(() => this.fitToPage());
+      if (this.store.doc.pages.length) requestAnimationFrame(() => this.fitToPage(0));
       else this.openAtActualSize();
     }
     document.getElementById('boardTitle').value = this.store.doc.name;
@@ -198,6 +203,34 @@ class App {
     this.surface.invalidate();
     localStorage.setItem('gazboard.lastBoard', this.store.doc.id);
     if (!opts.silent) this.toast('Opened ' + this.store.doc.name);
+    if (!opts.noMigrationPrompt) this.checkStrayContent(data);
+  }
+
+  /**
+   * Ask about content that sits outside the paper.
+   *
+   * Boards saved before pages clipped their contents can have ink hanging off
+   * the sheet. Now that the paper is a real boundary that ink would be hidden,
+   * so the board is never touched without asking - and answering "keep" leaves
+   * it visible on the desk rather than quietly swallowing it.
+   *
+   * Only boards written by an older build are asked about: anything saved
+   * since cannot have stray content in the first place.
+   */
+  async checkStrayContent(data) {
+    if ((data?.schema ?? 1) >= 2) return;
+    if (!this.pageCount) return;
+    const stray = this.offPageObjects();
+    if (!stray.length) return;
+
+    const answer = await this.choose(
+      stray.length === 1 ? 'One thing sits outside the page' : `${stray.length} things sit outside the page`,
+      'Pages now hold their ink the way paper does, so anything outside the sheet is clipped. This board was made before that. You can bring it all onto the page, or leave it where it is.',
+      [{ id: 'fit', label: 'Bring it onto the page', primary: true },
+       { id: 'keep', label: 'Leave it where it is' }]
+    );
+    if (answer === 'fit') this.fitContentToPage();
+    else this.toast('Left as it was — the stray parts sit off the paper');
   }
 
   /* ---------------- tools & selection ---------------- */
@@ -484,7 +517,13 @@ class App {
       case 'export.pngSelection': exportPng(this, { scale: 2, selectionOnly: true }); break;
       case 'export.svg': this.checkOffPageBeforeExport().then((go) => go && exportSvg(this)); break;
       case 'export.pdf': this.exportPdfWithSetup(); break;
-      case 'view.fitPage': this.fitToPage(); break;
+      case 'view.fitPage': this.fitToPage(this.currentPageIndex()); break;
+      case 'view.fitAllPages': this.fitToAllPages(); break;
+      case 'page.add': this.addPage(); break;
+      case 'page.duplicate': this.duplicatePage(); break;
+      case 'page.delete': this.deletePage(); break;
+      case 'page.next': this.nextPage(); break;
+      case 'page.prev': this.prevPage(); break;
       case 'page.fitContent': this.fitContentToPage(); break;
       case 'board.save': saveBoardFile(this); break;
       case 'board.open': openBoardFile(this); break;
@@ -500,7 +539,7 @@ class App {
     this.surface.invalidate();
   }
 
-  afterCamera() { this.syncZoom(); this.textEditor.reposition(); this.surface.invalidate(); }
+  afterCamera() { this.surface.clampCamera(); this.syncZoom(); this.textEditor.reposition(); this.surface.invalidate(); }
 
   pruneSelection() {
     for (const id of [...this.surface.selection]) if (!this.store.has(id)) this.surface.selection.delete(id);
@@ -565,10 +604,27 @@ class App {
     const pct = Math.round(this.surface.cam.z * 100);
     const el = document.getElementById('zoomLabel');
     if (el) el.textContent = pct + '%';
+    // the page readout follows the camera, not the document, so it has to be
+    // refreshed here as well as in syncUI - otherwise scrolling from page 1 to
+    // page 2 leaves the navigator insisting you are still on page 1
+    this.syncPageLabel();
     if (pct !== this._lastZoomPct) {
       if (this._lastZoomPct !== undefined) this.flashZoom(pct);
       this._lastZoomPct = pct;
     }
+  }
+
+  syncPageLabel() {
+    const bar = document.getElementById('pagebar');
+    if (!bar) return;
+    const n = this.pageCount;
+    bar.hidden = n === 0;
+    if (!n) return;
+    const i = this.currentPageIndex();
+    const label = document.getElementById('pageLabel');
+    if (label) label.textContent = `Page ${i + 1} of ${n}`;
+    bar.querySelector('[data-page="prev"]').disabled = i <= 0;
+    bar.querySelector('[data-page="next"]').disabled = i >= n - 1;
   }
 
   /** A big centred readout while zooming, the way Whiteboard shows it. */
@@ -592,89 +648,263 @@ class App {
     setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .25s'; setTimeout(() => el.remove(), 260); }, ms);
   }
 
-  /**
-   * Switch between the infinite canvas and a fixed sheet.
+  /* ================================================================= *
+   *  Pages
    *
-   * Nothing is ever clipped: ink already outside the new page stays exactly
-   * where it is, it just sits off the paper. Switching back to infinite always
-   * gives everything back.
+   *  A board is either an infinite canvas or a pad: a strip of sheets laid
+   *  out top to bottom in the same world coordinates. Everything below works
+   *  in terms of that strip; nothing else in the app needed to learn about
+   *  pages, because a page is just a rectangle.
+   * ================================================================= */
+
+  get pages() { return this.store.doc.pages; }
+  get pageCount() { return this.store.doc.pages.length; }
+
+  /** Which sheet the view is looking at, by what is in the middle of the window. */
+  currentPageIndex() {
+    const pages = this.pages;
+    if (!pages.length) return -1;
+    const sf = this.surface;
+    const c = sf.cam.toWorld(sf.width / 2, sf.height / 2);
+    return nearestPageIndex(pages, c.x, c.y);
+  }
+
+  /**
+   * Set the paper size for the whole pad.
+   *
+   * Sizes apply to every sheet, the way a pad is all one size - and because
+   * the strip is laid out from the sheet heights, changing the size relays it
+   * and moves the ink on later pages with it, so page 3 stays page 3.
    *
    * @param {string} paperId  a PAPER id, or 'infinite'
    */
   async setPageSize(paperId, orientation = 'portrait') {
     const { pageWorldSize, paperById } = await import('./ui/pdfdialog.js');
+
     if (paperId === 'infinite' || !paperId) {
-      this.store.setPage(null);
+      this.store.setPages([], 'infinite canvas');
       this.toast('Infinite canvas');
-    } else {
-      const page = pageWorldSize(paperId, orientation);
-      if (!page) return;
-      this.store.setPage(page);
-      this.settings.pageOrientation = orientation;
-      this.settings.pagePaper = paperId;
-      this.saveSettings();
-      this.fitToPage();
-      this.toast(`${paperById(paperId).label} ${orientation}`);
+      this.surface.invalidate();
+      this.syncUI();
+      return;
     }
+
+    const size = pageWorldSize(paperId, orientation);
+    if (!size) return;
+    const count = Math.max(1, this.pageCount);
+    const next = Array.from({ length: count }, () => ({ ...size }));
+
+    // objects ride their sheet to its new place in the strip
+    const ops = [this.store.pagesOp(next)];
+    if (this.pageCount) ops.push(...this.relayoutOps(this.pages, next));
+
+    this.settings.pageOrientation = orientation;
+    this.settings.pagePaper = paperId;
+    this.saveSettings();
+    this.store.commit('page size', ops);
+    this.fitToPage(Math.min(this.currentPageIndex(), count - 1));
+    this.toast(`${paperById(paperId).label} ${orientation}${count > 1 ? ` — ${count} pages` : ''}`);
     this.surface.invalidate();
     this.syncUI();
   }
 
-  /** How much of the board is off the sheet. Empty list when it all fits. */
+  /**
+   * `set` ops that carry each sheet's contents from an old layout to a new one.
+   *
+   * Sheets are positioned by their index, so inserting, deleting or resizing a
+   * page moves every page after it. The ink has to move with it or page 3's
+   * notes would end up in page 2's gutter.
+   *
+   * @param {Array} from  the page list the objects are currently placed against
+   * @param {Array} to    the page list they should end up on
+   * @param {Function} map  old index -> new index, or -1 to leave an object be
+   */
+  relayoutOps(from, to, map = (i) => i) {
+    const a = pageRects(from), b = pageRects(to);
+    const ops = [];
+    for (const o of this.store.objects) {
+      const i = pageIndexForBox(from, boundsOf(o));
+      if (i < 0) continue;                       // loose content stays put
+      const j = map(i);
+      if (j < 0 || j >= b.length || !a[i]) continue;
+      const dx = b[j].x - a[i].x, dy = b[j].y - a[i].y;
+      if (!dx && !dy) continue;
+      const copy = structuredClone(o);
+      translateObject(copy, dx, dy);
+      ops.push(o.type === 'stroke'
+        ? { t: 'set', id: o.id, before: { points: structuredClone(o.points), bbox: { ...o.bbox } }, after: { points: copy.points, bbox: copy.bbox } }
+        : { t: 'set', id: o.id, before: { x: o.x, y: o.y }, after: { x: copy.x, y: copy.y } });
+    }
+    return ops;
+  }
+
+  /** Add a sheet after `index` (default: after the one you are looking at). */
+  addPage(index = this.currentPageIndex(), { copyOf = -1 } = {}) {
+    if (!this.pageCount) { this.toast('This board is an infinite canvas'); return false; }
+    const at = clamp(index + 1, 0, this.pageCount);
+    const size = { ...this.pages[clamp(index, 0, this.pageCount - 1)] };
+    const next = this.pages.map((p) => ({ ...p }));
+    next.splice(at, 0, size);
+
+    // everything from `at` onwards shifts one place down the strip
+    const ops = [...this.relayoutOps(this.pages, next, (i) => (i >= at ? i + 1 : i)), this.store.pagesOp(next)];
+
+    if (copyOf >= 0 && copyOf < this.pageCount) {
+      const srcRect = pageRects(this.pages)[copyOf];
+      const dstRect = pageRects(next)[at];
+      for (const o of this.store.objects) {
+        if (pageIndexForBox(this.pages, boundsOf(o)) !== copyOf) continue;
+        const copy = structuredClone(o);
+        copy.id = uid(o.type === 'stroke' ? 's' : 'o');
+        delete copy.attachedTo;
+        translateObject(copy, dstRect.x - srcRect.x, dstRect.y - srcRect.y);
+        ops.push({ t: 'add', obj: copy });
+      }
+    }
+
+    this.store.commit(copyOf >= 0 ? 'duplicate page' : 'add page', ops);
+    this.goToPage(at);
+    this.toast(copyOf >= 0 ? `Page ${at + 1} duplicated` : `Page ${at + 1} of ${next.length}`);
+    return true;
+  }
+
+  duplicatePage(index = this.currentPageIndex()) { return this.addPage(index, { copyOf: index }); }
+
+  /**
+   * Remove a sheet and everything on it.
+   *
+   * Deleting a page throws away work, so it asks first when the page is not
+   * empty - and the whole thing (the objects, the page, and moving every later
+   * page up) is one transaction, so a single undo brings the page back intact.
+   */
+  async deletePage(index = this.currentPageIndex()) {
+    if (this.pageCount <= 1) { this.toast('A pad needs at least one page'); return false; }
+    if (index < 0 || index >= this.pageCount) return false;
+
+    const doomed = this.store.objects.filter((o) => pageIndexForBox(this.pages, boundsOf(o)) === index);
+    if (doomed.length) {
+      const answer = await this.choose(
+        `Delete page ${index + 1}?`,
+        `${doomed.length === 1 ? 'One thing is' : doomed.length + ' things are'} on it. Deleting the page deletes them too — one undo brings it all back.`,
+        [{ id: 'delete', label: 'Delete the page', primary: true }, { id: 'keep', label: 'Keep it' }]
+      );
+      if (answer !== 'delete') return false;
+    }
+
+    const next = this.pages.map((p) => ({ ...p }));
+    next.splice(index, 1);
+    const ops = [
+      ...doomed.map((o) => ({ t: 'del', id: o.id, obj: structuredClone(o), index: this.store.indexOf(o.id) })),
+      ...this.relayoutOps(this.pages, next, (i) => (i === index ? -1 : i > index ? i - 1 : i)),
+      this.store.pagesOp(next)
+    ];
+    this.store.commit('delete page', ops);
+    this.setSelection([]);
+    this.goToPage(Math.min(index, next.length - 1));
+    this.toast(`Page deleted — ${next.length} left`);
+    return true;
+  }
+
+  goToPage(index) {
+    if (!this.pageCount) return;
+    const i = clamp(index, 0, this.pageCount - 1);
+    this.fitToPage(i);
+    this.syncUI();
+  }
+
+  nextPage() { this.goToPage(this.currentPageIndex() + 1); }
+  prevPage() { this.goToPage(this.currentPageIndex() - 1); }
+
+  /** Everything that is not fully inside some sheet. Empty on an infinite board. */
   offPageObjects() {
-    const page = this.store.doc.page;
-    if (!page) return [];
-    const L = -page.w / 2, T = -page.h / 2, R = page.w / 2, B = page.h / 2;
+    const pages = this.pages;
+    if (!pages.length) return [];
+    const rects = pageRects(pages);
     return this.store.objects.filter((o) => {
       const b = boundsOf(o);
-      return b.x < L - 0.5 || b.y < T - 0.5 || b.x + b.w > R + 0.5 || b.y + b.h > B + 0.5;
+      const i = pageIndexForBox(pages, b);
+      if (i < 0) return true;
+      const r = rects[i];
+      return b.x < r.x - 0.5 || b.y < r.y - 0.5 || b.x + b.w > r.x + r.w + 0.5 || b.y + b.h > r.y + r.h + 0.5;
     });
   }
 
   /**
-   * Shrink and centre everything so the whole board sits on the sheet.
+   * Bring stray content back onto the paper.
    *
-   * Aspect ratio is kept, so nothing is distorted, and it only ever scales
-   * down - blowing a small sketch up to fill A4 is not what anyone means by
-   * "fit". One undo puts it all back.
+   * On a single sheet that means shrinking and centring the whole board, which
+   * is what someone means by "fit it on the page". On a pad it means nudging
+   * each stray thing onto the sheet it is nearest, because squashing pages two
+   * and three onto page one is nobody's idea of fitting. Either way it is one
+   * commit, so one undo puts it all back.
    *
    * @returns {boolean} false when there was nothing to do
    */
   fitContentToPage(margin = 24) {
-    const page = this.store.doc.page;
-    if (!page) { this.toast('This board has no page — it is an infinite canvas'); return false; }
-    const b = this.store.contentBounds();
-    if (!b || !b.w || !b.h) { this.toast('Nothing on the board yet'); return false; }
+    const pages = this.pages;
+    if (!pages.length) { this.toast('This board has no page — it is an infinite canvas'); return false; }
+    const rects = pageRects(pages);
 
-    const availW = page.w - margin * 2, availH = page.h - margin * 2;
-    const scale = Math.min(availW / b.w, availH / b.h, 1);
-    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    if (pages.length === 1) {
+      const page = rects[0];
+      const b = this.store.contentBounds();
+      if (!b || !b.w || !b.h) { this.toast('Nothing on the board yet'); return false; }
+      const availW = page.w - margin * 2, availH = page.h - margin * 2;
+      const scale = Math.min(availW / b.w, availH / b.h, 1);
+      const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+      const tx = page.x + page.w / 2, ty = page.y + page.h / 2;
 
-    // one undoable commit for the whole board
-    this.store.updateMany(this.store.objects.map((o) => o.id), (o) => {
+      this.store.updateMany(this.store.objects.map((o) => o.id), (o) => {
+        const copy = structuredClone(o);
+        scaleObject(copy, scale, scale, cx, cy);       // about the content's own centre
+        translateObject(copy, tx - cx, ty - cy);       // then centre that on the sheet
+        return patchFor(o, copy);
+      }, 'fit to page');
+      this.setSelection([]);
+      this.fitToPage(0);
+      this.toast(scale < 1 ? `Fitted to the page at ${Math.round(scale * 100)}%` : 'Centred on the page');
+      return true;
+    }
+
+    const stray = this.offPageObjects();
+    if (!stray.length) { this.toast('Everything is already on a page'); return false; }
+    this.store.updateMany(stray.map((o) => o.id), (o) => {
+      const b = boundsOf(o);
+      let i = pageIndexForBox(pages, b);
+      if (i < 0) i = nearestPageIndex(pages, b.x + b.w / 2, b.y + b.h / 2);
+      const r = { x: rects[i].x + margin, y: rects[i].y + margin, w: rects[i].w - margin * 2, h: rects[i].h - margin * 2 };
       const copy = structuredClone(o);
-      scaleObject(copy, scale, scale, cx, cy);   // about the content's own centre
-      translateObject(copy, -cx, -cy);           // then centre that on the sheet
-      const patch = { x: copy.x, y: copy.y, w: copy.w, h: copy.h };
-      if (copy.type === 'stroke') { patch.points = copy.points; patch.bbox = copy.bbox; patch.width = copy.width; delete patch.x; delete patch.y; delete patch.w; delete patch.h; }
-      if (copy.fontSize !== undefined) patch.fontSize = copy.fontSize;
-      if (copy.lineWidth !== undefined) patch.lineWidth = copy.lineWidth;
-      if (copy.autoSize !== undefined) patch.autoSize = copy.autoSize;
-      return patch;
-    }, 'fit to page');
+      const s = Math.min(r.w / b.w, r.h / b.h, 1);
+      if (s < 1) scaleObject(copy, s, s, b.x + b.w / 2, b.y + b.h / 2);
+      const { dx, dy } = offsetIntoRect(boundsOf(copy), r);
+      translateObject(copy, dx, dy);
+      return patchFor(o, copy);
+    }, 'fit to pages');
     this.setSelection([]);
-    this.fitToPage();
-    this.toast(scale < 1 ? `Fitted to the page at ${Math.round(scale * 100)}%` : 'Centred on the page');
+    this.toast(`Brought ${stray.length === 1 ? 'one thing' : stray.length + ' things'} back onto the paper`);
     return true;
   }
 
-  /** Sit the whole sheet in the window, with a little room around it. */
-  fitToPage() {
-    const page = this.store.doc.page;
-    if (!page) return;
+  /** Sit one sheet in the window, with a little room around it. */
+  fitToPage(index = 0) {
+    const rects = pageRects(this.pages);
+    if (!rects.length) return;
+    const r = rects[clamp(index, 0, rects.length - 1)];
     const sf = this.surface;
-    const box = { x: -page.w / 2 - 40, y: -page.h / 2 - 40, w: page.w + 80, h: page.h + 80 };
+    const box = { x: r.x - 40, y: r.y - 40, w: r.w + 80, h: r.h + 80 };
     if (sf.width && sf.height) sf.cam.fit(box, sf.width, sf.height);
+    sf.clampCamera();
+    this.syncZoom();
+    sf.invalidate();
+  }
+
+  /** Sit the whole pad in the window. */
+  fitToAllPages() {
+    const b = stripBounds(this.pages);
+    if (!b) return;
+    const sf = this.surface;
+    if (sf.width && sf.height) sf.cam.fit({ x: b.x - 40, y: b.y - 40, w: b.w + 80, h: b.h + 80 }, sf.width, sf.height);
+    sf.clampCamera();
     this.syncZoom();
     sf.invalidate();
   }
@@ -708,7 +938,7 @@ class App {
     if (!this.store.objects.length) { this.toast('Nothing on the board to export'); return null; }
     if (!(await this.checkOffPageBeforeExport())) return null;
     const { choosePageSetup, paperForPage } = await import('./ui/pdfdialog.js');
-    const page = this.store.doc.page;
+    const page = this.store.page;
     let box;
     if (page && page.w && page.h) {
       box = { x: -page.w / 2, y: -page.h / 2, w: page.w, h: page.h };
@@ -950,6 +1180,13 @@ class App {
 
     if (e.code === 'Space') { this.interaction.spaceDown = true; e.preventDefault(); return; }
 
+    if (this.pageCount) {
+      if (e.key === 'PageDown') { e.preventDefault(); this.command('page.next'); return; }
+      if (e.key === 'PageUp') { e.preventDefault(); this.command('page.prev'); return; }
+      if (e.key === 'Home' && !mod) { e.preventDefault(); this.goToPage(0); return; }
+      if (e.key === 'End' && !mod) { e.preventDefault(); this.goToPage(this.pageCount - 1); return; }
+    }
+
     if (mod) {
       const k = e.key.toLowerCase();
       if (k === 'z' && !e.shiftKey) { e.preventDefault(); this.command('undo'); return; }
@@ -1012,3 +1249,22 @@ class App {
 window.addEventListener('DOMContentLoaded', () => {
   window.app = new App();
 });
+
+/**
+ * The `set` payload that moves an object from `o` to `copy`.
+ *
+ * Strokes carry their geometry in points+bbox and everything else in x/y/w/h;
+ * sending the wrong pair leaves an object that renders in one place and hit
+ * tests in another.
+ */
+function patchFor(o, copy) {
+  if (o.type === 'stroke') {
+    const patch = { points: copy.points, bbox: copy.bbox, width: copy.width };
+    return patch;
+  }
+  const patch = { x: copy.x, y: copy.y, w: copy.w, h: copy.h };
+  if (copy.fontSize !== undefined) patch.fontSize = copy.fontSize;
+  if (copy.lineWidth !== undefined) patch.lineWidth = copy.lineWidth;
+  if (copy.autoSize !== undefined) patch.autoSize = copy.autoSize;
+  return patch;
+}

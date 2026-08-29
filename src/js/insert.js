@@ -1,6 +1,8 @@
 // Inserting images and documents (Word / PowerPoint / PDF) onto the board.
 
+import { pageRects, pageIndexForBox, offsetIntoRect, nearestPageIndex } from './core/pages.js';
 import { uid } from './core/util.js';
+import { boundsOf } from './core/store.js';
 import { openPdf } from './importers/pdf.js';
 import { choosePages } from './ui/pagepicker.js';
 
@@ -82,7 +84,8 @@ async function makeImageObject(app, dataUrl, name, index = 0, at) {
   const scale = Math.min(1, maxW / w);
   const W = w * scale, H = h * scale;
   const o = at ? { x: at.x - W / 2, y: at.y - H / 2 } : dropOrigin(app, W, H);
-  return { id: uid('img'), type: 'image', x: o.x + index * 24, y: o.y + index * 24, w: W, h: H, rotation: 0, src: dataUrl, name };
+  const obj = { id: uid('img'), type: 'image', x: o.x + index * 24, y: o.y + index * 24, w: W, h: H, rotation: 0, src: dataUrl, name };
+  return fitOntoPaper(app, obj);
 }
 
 /**
@@ -130,10 +133,14 @@ export async function insertDocument(app, filePath, opts = {}) {
     await doc.destroy();
     doc = null;
 
-    const objs = layoutPages(app, rendered, { name, layout, multiPage: total > 1 });
-    app.store.addMany(objs, 'insert document');
+    const { objs, pages: padPages, focus } = layoutPages(app, rendered, { name, layout, multiPage: total > 1 });
+    // growing the pad and filling it are one commit, so one undo removes both
+    const ops = [];
+    if (padPages) ops.push(app.store.pagesOp(padPages));
+    for (const obj of objs) ops.push({ t: 'add', obj });
+    app.store.commit('insert document', ops);
     app.setSelection([]);                       // separate objects, not a selected clump
-    app.frameObjects(objs);
+    if (focus >= 0) app.goToPage(focus); else app.frameObjects(objs);
     render.close();
     app.toast(`${name}: ${objs.length} page${objs.length === 1 ? '' : 's'} added${res.engine === 'builtin' ? ' (built-in converter)' : ''}`, 'doc');
     return objs;
@@ -147,20 +154,38 @@ export async function insertDocument(app, filePath, opts = {}) {
 
 /** Place rendered pages on the board without overlapping what is already there. */
 function layoutPages(app, rendered, { name, layout, multiPage }) {
-  let worldScale = 1.6;                         // 72dpi points -> comfortable board units
+  const mk = (p, box) => ({
+    id: uid('pg'), type: 'image', kind: 'page',
+    x: box.x, y: box.y, w: box.w, h: box.h,
+    rotation: 0, src: p.dataUrl,
+    name, label: multiPage ? `${name} — page ${p.page}` : name,
+    docSource: name, docPage: p.page
+  });
 
-  // On a fixed sheet, an imported page has to land ON the sheet. A slide is
-  // about 1536 units wide at the default scale and A4 is 794, so without this
-  // the import would hang off both edges and quietly get cropped on export.
-  const page = app.store.doc.page;
-  if (page && page.w && page.h) {
+  // On a pad, an imported document becomes pages of the pad - one sheet each,
+  // centred and scaled to fit. That is what importing a PDF into a notebook is
+  // supposed to mean, and it is why nothing has to be cropped.
+  const pad = app.pages;
+  if (pad.length) {
     const margin = 24;
-    const widest = Math.max(...rendered.map((p) => p.width));
-    const tallest = Math.max(...rendered.map((p) => p.height));
-    const fit = Math.min((page.w - margin * 2) / widest, (page.h - margin * 2) / tallest);
-    worldScale = Math.min(worldScale, fit);
+    const occupied = new Set(app.store.objects.map((o) => pageIndexForBox(pad, boundsOf(o))));
+    const here = app.currentPageIndex();
+    const start = occupied.has(here) ? pad.length : here;
+
+    const pages = pad.map((q) => ({ ...q }));
+    while (pages.length < start + rendered.length) pages.push({ ...pad[pad.length - 1] });
+    const rects = pageRects(pages);
+
+    const objs = rendered.map((p, i) => {
+      const r = rects[start + i];
+      const s = Math.min((r.w - margin * 2) / p.width, (r.h - margin * 2) / p.height);
+      const w = p.width * s, h = p.height * s;
+      return mk(p, { x: r.x + (r.w - w) / 2, y: r.y + (r.h - h) / 2, w, h });
+    });
+    return { objs, pages: pages.length > pad.length ? pages : null, focus: start };
   }
 
+  const worldScale = 1.6;                       // 72dpi points -> comfortable board units
   const gap = 48;
   const cellW = Math.max(...rendered.map((p) => p.width)) * worldScale;
   const cellH = Math.max(...rendered.map((p) => p.height)) * worldScale;
@@ -173,13 +198,9 @@ function layoutPages(app, rendered, { name, layout, multiPage }) {
   const rows = layout === 'stack' ? 1 : Math.ceil(rendered.length / perRow);
   const spanW = layout === 'stack' ? cellW + step * (rendered.length - 1) : cols * (cellW + gap) - gap;
   const spanH = layout === 'stack' ? cellH + step * (rendered.length - 1) : rows * (cellH + gap) - gap;
-  // a single page onto an empty sheet goes in the middle of the sheet
-  const onlyPage = page && page.w && rendered.length === 1 && !app.store.objects.length;
-  const origin = onlyPage
-    ? { x: -spanW / 2, y: -spanH / 2 }
-    : dropOrigin(app, spanW, spanH);
+  const origin = dropOrigin(app, spanW, spanH);
 
-  return rendered.map((p, i) => {
+  const objs = rendered.map((p, i) => {
     let x, y;
     if (layout === 'stack') { x = origin.x + i * step; y = origin.y + i * step; }
     else {
@@ -187,14 +208,32 @@ function layoutPages(app, rendered, { name, layout, multiPage }) {
       x = origin.x + col * (cellW + gap);
       y = origin.y + row * (cellH + gap);
     }
-    return {
-      id: uid('pg'), type: 'image', kind: 'page',
-      x, y, w: p.width * worldScale, h: p.height * worldScale,
-      rotation: 0, src: p.dataUrl,
-      name, label: multiPage ? `${name} — page ${p.page}` : name,
-      docSource: name, docPage: p.page
-    };
+    return mk(p, { x, y, w: p.width * worldScale, h: p.height * worldScale });
   });
+  return { objs, pages: null, focus: -1 };
+}
+
+/**
+ * Shrink and slide a new object onto the sheet it landed nearest.
+ *
+ * A phone photo is several thousand units across and A4 is 794, so dropping
+ * one onto a pad without this would put a picture on the paper that is mostly
+ * off it - and clipped ink you cannot see is exactly what pages are meant to
+ * prevent.
+ */
+function fitOntoPaper(app, obj) {
+  const pad = app.pages;
+  if (!pad.length) return obj;
+  const margin = 16;
+  const rects = pageRects(pad);
+  let i = pageIndexForBox(pad, obj);
+  if (i < 0) i = nearestPageIndex(pad, obj.x + obj.w / 2, obj.y + obj.h / 2);
+  const r = { x: rects[i].x + margin, y: rects[i].y + margin, w: rects[i].w - margin * 2, h: rects[i].h - margin * 2 };
+  const s = Math.min(r.w / obj.w, r.h / obj.h, 1);
+  if (s < 1) { obj.w *= s; obj.h *= s; }
+  const { dx, dy } = offsetIntoRect(obj, r);
+  obj.x += dx; obj.y += dy;
+  return obj;
 }
 
 export async function pickAndInsertDocument(app) {

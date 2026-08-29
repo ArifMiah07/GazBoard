@@ -1,6 +1,7 @@
 // Canvas painting: backgrounds, every object type, and the selection chrome.
 
 import { boundsOf, worldBounds } from './store.js';
+import { pageRects as worldPageRects } from './pages.js';
 import { hexToRgba, readableText, wrapText, fitFontSize, clamp } from './util.js';
 import { inkPath, strokeWeight } from './ink.js';
 
@@ -38,57 +39,40 @@ export function getImage(src, onload) {
  * right and bottom of the canvas unpainted on any HiDPI display.
  */
 /**
- * The sheet, when the board has a fixed page size.
+ * The sheets, when the board is a pad rather than an infinite canvas.
  *
- * Drawn in screen space, like the background it sits on: a white rectangle with
- * a soft shadow over a dimmed surround, so the edge of the page is obvious
- * without anything being clipped. Anything drawn outside still shows - it just
- * sits off the paper, which is exactly what it will look like when printed.
- *
- * @returns {{x:number,y:number,w:number,h:number}|null} the sheet in screen px
+ * Drawn in screen space, like the background they sit on: white rectangles
+ * with a soft shadow over a dimmed surround. The ruling belongs to the paper,
+ * so it is anchored to each sheet's own top-left corner and clipped to it -
+ * a continuous world grid would meet every page at a different offset and
+ * look nothing like a pad.
  */
-export function pageRect(page, cam) {
-  if (!page || !page.w || !page.h) return null;
-  const x = -page.w / 2 * cam.z + cam.x;
-  const y = -page.h / 2 * cam.z + cam.y;
-  return { x, y, w: page.w * cam.z, h: page.h * cam.z };
+export function pageRects(pages, cam) {
+  return worldPageRects(pages).map((r) => ({
+    x: r.x * cam.z + cam.x, y: r.y * cam.z + cam.y, w: r.w * cam.z, h: r.h * cam.z
+  }));
 }
 
-export function drawBackground(ctx, bg, cam, w, h, page = null) {
-  ctx.save();
+/** Kept for the single-sheet callers: the first sheet in screen space. */
+export function pageRect(pages, cam) {
+  return pageRects(pages, cam)[0] || null;
+}
 
-  const sheet = pageRect(page, cam);
-  if (sheet) {
-    // the world beyond the paper
-    ctx.fillStyle = shadeOf(bg.color || '#ffffff');
-    ctx.fillRect(0, 0, w, h);
-    ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,.20)';
-    ctx.shadowBlur = Math.min(26, 10 + cam.z * 8);
-    ctx.shadowOffsetY = 2;
-    ctx.fillStyle = bg.color || '#ffffff';
-    ctx.fillRect(sheet.x, sheet.y, sheet.w, sheet.h);
-    ctx.restore();
-    // the pattern belongs to the paper, so keep it on the paper
-    ctx.beginPath();
-    ctx.rect(sheet.x, sheet.y, sheet.w, sheet.h);
-    ctx.clip();
-  } else {
-    ctx.fillStyle = bg.color || '#ffffff';
-    ctx.fillRect(0, 0, w, h);
-  }
-
+function drawPattern(ctx, bg, cam, w, h, anchor) {
   const pattern = bg.pattern || 'none';
-  if (pattern === 'none') { ctx.restore(); if (sheet) strokePageEdge(ctx, sheet); return; }
+  if (pattern === 'none') return;
 
   const base = 40;                        // world spacing
   let step = base * cam.z;
   while (step < 14) step *= 2;            // keep it readable when zoomed out
   while (step > 120) step /= 2;
-  const ox = ((cam.x % step) + step) % step;
-  const oy = ((cam.y % step) + step) % step;
+  const ax = anchor ? anchor.x : cam.x;
+  const ay = anchor ? anchor.y : cam.y;
+  const ox = ((ax % step) + step) % step;
+  const oy = ((ay % step) + step) % step;
   const color = bg.patternColor || '#c8c6c4';
 
+  ctx.save();
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
   ctx.lineWidth = 1;
@@ -107,8 +91,8 @@ export function drawBackground(ctx, bg, cam, w, h, page = null) {
     ctx.globalAlpha = 0.3;
     const small = step / 4;
     ctx.beginPath();
-    for (let x = ((cam.x % small) + small) % small; x < w; x += small) { ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, h); }
-    for (let y = ((cam.y % small) + small) % small; y < h; y += small) { ctx.moveTo(0, Math.round(y) + 0.5); ctx.lineTo(w, Math.round(y) + 0.5); }
+    for (let x = ((ax % small) + small) % small; x < w; x += small) { ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, h); }
+    for (let y = ((ay % small) + small) % small; y < h; y += small) { ctx.moveTo(0, Math.round(y) + 0.5); ctx.lineTo(w, Math.round(y) + 0.5); }
     ctx.stroke();
     ctx.globalAlpha = 0.7;
     ctx.beginPath();
@@ -117,7 +101,50 @@ export function drawBackground(ctx, bg, cam, w, h, page = null) {
     ctx.stroke();
   }
   ctx.restore();
-  if (sheet) strokePageEdge(ctx, sheet);
+}
+
+/**
+ * Paints in SCREEN space, in CSS pixels. The caller must already have applied
+ * the device-pixel-ratio transform - resetting to the identity matrix here
+ * would paint CSS-pixel coordinates into a device-pixel buffer and leave the
+ * right and bottom of the canvas unpainted on any HiDPI display.
+ */
+export function drawBackground(ctx, bg, cam, w, h, pages = null) {
+  ctx.save();
+
+  const sheets = pages && pages.length ? pageRects(pages, cam) : [];
+  if (!sheets.length) {
+    ctx.fillStyle = bg.color || '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    drawPattern(ctx, bg, cam, w, h, null);
+    ctx.restore();
+    return;
+  }
+
+  // the desk the pad sits on
+  ctx.fillStyle = shadeOf(bg.color || '#ffffff');
+  ctx.fillRect(0, 0, w, h);
+
+  for (const sheet of sheets) {
+    if (sheet.x > w || sheet.y > h || sheet.x + sheet.w < 0 || sheet.y + sheet.h < 0) continue;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,.20)';
+    ctx.shadowBlur = Math.min(26, 10 + cam.z * 8);
+    ctx.shadowOffsetY = 2;
+    ctx.fillStyle = bg.color || '#ffffff';
+    ctx.fillRect(sheet.x, sheet.y, sheet.w, sheet.h);
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(sheet.x, sheet.y, sheet.w, sheet.h);
+    ctx.clip();
+    drawPattern(ctx, bg, cam, w, h, { x: sheet.x, y: sheet.y });
+    ctx.restore();
+
+    strokePageEdge(ctx, sheet);
+  }
+  ctx.restore();
 }
 
 /* =================================================================== *

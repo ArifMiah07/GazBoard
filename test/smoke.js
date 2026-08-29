@@ -1902,41 +1902,49 @@ async function run(win, app) {
     const { pageRect } = await import('app://board/js/core/render.js');
     const r = {};
     a.newBoard(true);
-    r.defaultIsInfinite = a.store.doc.page === null;
+    r.defaultIsInfinite = a.store.pageCount === 0;
 
     await a.setPageSize('a4', 'landscape');
-    r.a4 = a.store.doc.page && { ...a.store.doc.page };
+    r.a4 = a.store.page && { ...a.store.page };
     r.expected = pageWorldSize('a4', 'landscape');
-    r.roundTrip = paperForPage(a.store.doc.page);
+    r.roundTrip = paperForPage(a.store.page);
 
     // ink outside the sheet must survive - a page is a guide, not a crop
     a.store.add({ id: 'faroff', type: 'shape', kind: 'rect', x: 5000, y: 5000, w: 100, h: 100,
                   rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 });
     r.objectsWithPage = a.store.objects.length;
     await a.setPageSize('infinite');
-    r.backToInfinite = a.store.doc.page === null;
+    r.backToInfinite = a.store.pageCount === 0;
     r.objectsAfter = a.store.objects.length;
     r.farStillThere = !!a.store.get('faroff');
 
     // and it survives a save/load round trip
     await a.setPageSize('letter', 'portrait');
     const saved = a.store.toJSON();
-    r.savedPage = saved.page && { ...saved.page };
+    r.savedPage = saved.pages[0] && { ...saved.pages[0] };
+    r.savedMirror = saved.page && { ...saved.page };      // for builds before multi-page
+    r.savedSchema = saved.schema;
     a.newBoard(true);
-    await a.loadBoard(saved, { silent: true });
-    r.loadedPage = a.store.doc.page && { ...a.store.doc.page };
+    await a.loadBoard(saved, { silent: true, noMigrationPrompt: true });
+    r.loadedPage = a.store.page && { ...a.store.page };
+
+    // a board written by an older build still opens, as a one-page pad
+    a.newBoard(true);
+    await a.loadBoard({ name: 'legacy', schema: 1, page: { w: 794, h: 1123 }, objects: [] },
+      { silent: true, noMigrationPrompt: true });
+    r.legacyOpens = a.store.pageCount === 1 && a.store.page.w === 794;
 
     // the sheet is drawn centred on the origin
-    const rect = pageRect({ w: 800, h: 600 }, { x: 0, y: 0, z: 1 });
+    const rect = pageRect([{ w: 800, h: 600 }], { x: 0, y: 0, z: 1 });
     r.sheetAtOrigin = rect;
-    r.sheetZoomed = pageRect({ w: 800, h: 600 }, { x: 0, y: 0, z: 0.5 });
+    r.sheetZoomed = pageRect([{ w: 800, h: 600 }], { x: 0, y: 0, z: 0.5 });
 
     // undo steps back to whatever the canvas was before, infinite included
     await a.setPageSize('infinite');
     await a.setPageSize('a3', 'landscape');
-    const beforeUndo = a.store.doc.page && a.store.doc.page.w;
+    const beforeUndo = a.store.page && a.store.page.w;
     a.command('edit.undo');
-    r.undoWent = { before: beforeUndo, after: a.store.doc.page };
+    r.undoWent = { before: beforeUndo, after: a.store.pageCount };
 
     a.newBoard(true); a.store.clear();
     return r;
@@ -1964,7 +1972,11 @@ async function run(win, app) {
   check('the sheet scales with the zoom',
     canvas.sheetZoomed.w === 400 && canvas.sheetZoomed.h === 300, JSON.stringify(canvas.sheetZoomed));
   check('changing the canvas size can be undone',
-    canvas.undoWent.before > 0 && canvas.undoWent.after === null, JSON.stringify(canvas.undoWent));
+    canvas.undoWent.before > 0 && canvas.undoWent.after === 0, JSON.stringify(canvas.undoWent));
+  check('a board is written so an older build can still open it',
+    canvas.savedSchema === 2 && canvas.savedMirror && canvas.savedMirror.w === canvas.savedPage.w,
+    JSON.stringify({ schema: canvas.savedSchema, mirror: canvas.savedMirror }));
+  check('a board saved before multi-page opens as a one-page pad', canvas.legacyOpens === true);
 
   const pageOpen = await js(`
     const a = window.app;
@@ -1973,9 +1985,9 @@ async function run(win, app) {
     const saved = a.store.toJSON();
     saved.camera = { x: 0, y: 0, z: 1 };          // a camera that shows a corner
     a.newBoard(true);
-    await a.loadBoard(saved, { silent: true, startup: true });
+    await a.loadBoard(saved, { silent: true, startup: true, noMigrationPrompt: true });
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-    const sf = a.surface, page = a.store.doc.page;
+    const sf = a.surface, page = a.store.page;
     // the whole sheet has to be inside the window
     const view = sf.cam.viewport(sf.width, sf.height);
     return {
@@ -1997,7 +2009,7 @@ async function run(win, app) {
     return {
       group: tpl.group,
       count: TEMPLATES.filter(t => t.page).length,
-      page: a.store.doc.page && { ...a.store.doc.page },
+      page: a.store.page && { ...a.store.page },
       objectsAdded: a.store.objects.length
     };
   `);
@@ -2035,7 +2047,7 @@ async function run(win, app) {
     a.newBoard(true);
     await a.setPageSize('a4', 'portrait');
     await insertDocument(a, ${JSON.stringify(path.join(FIX, 'lecture-09-greedy.pptx'))}, { pages: [1], layout: 'row' });
-    const page = a.store.doc.page;
+    const page = a.store.page;
     const img = a.store.objects.find(o => o.type === 'image');
     r.imported = img && { w: Math.round(img.w), h: Math.round(img.h), x: Math.round(img.x), y: Math.round(img.y) };
     r.page = { w: page.w, h: page.h };
@@ -2064,6 +2076,254 @@ async function run(win, app) {
     a.newBoard(true); a.store.clear();
     return r;
   `);
+
+  /* ================================================================= *
+   *  Paper: pages clip, and a board can have several of them
+   * ================================================================= */
+  const clip = await js(`
+    const a = window.app;
+    const { pageRects } = await import('app://board/js/core/pages.js');
+    const r = {};
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    const sheet = pageRects(a.pages)[0];
+
+    // A stroke run off the right edge, driven through the REAL motion path -
+    // the point is to exercise the code that decides what to keep, not to
+    // re-implement its rule here and then agree with myself.
+    const inter = a.interaction;
+    const cam = a.surface.cam;
+    const toScreen = (wp) => ({ x: wp.x * cam.z + cam.x, y: wp.y * cam.z + cam.y });
+    const startWp = { x: sheet.x + 40, y: sheet.y + 40 };
+    inter.startStroke({ pointerType: 'pen', pressure: 0.5 }, startWp, 'pen');
+    r.started = !!inter.action;
+    const act = inter.action;
+    for (let i = 1; i <= 120; i++) {
+      inter.applyMotion(toScreen({ x: startWp.x + i * 12, y: startWp.y }), {}, null);
+    }
+    r.pointCount = act.obj.points.length;
+    r.strokeStayedOn = act.obj.points.every(p => p.x <= sheet.x + sheet.w + 0.01);
+    r.strokeHasInk = act.obj.points.length > 3;
+    r.walkedPast = startWp.x + 120 * 12 > sheet.x + sheet.w;   // the gesture really did leave the paper
+
+    // and coming back onto the paper resumes the same stroke
+    const beforeReturn = act.obj.points.length;
+    inter.applyMotion(toScreen({ x: sheet.x + 200, y: startWp.y + 30 }), {}, null);
+    r.resumedOnReturn = act.obj.points.length > beforeReturn;
+
+    inter.finishStroke(act);
+    inter.action = null;
+    r.strokeCommitted = a.store.objects.some(o => o.type === 'stroke');
+    r.strokeOffPage = a.offPageObjects().length;
+
+    // starting in the gutter does nothing at all
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    inter.startStroke({ pointerType: 'pen', pressure: 0.5 }, { x: sheet.x - 400, y: sheet.y }, 'pen');
+    r.gutterRefused = !inter.action;
+    inter.action = null; a.surface.wet = null;
+
+    // a note dropped past the edge is slid back onto the paper
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    const s0 = pageRects(a.pages)[0];
+    a.interaction.dropNote({ x: s0.x + s0.w + 300, y: s0.y + 100 });
+    const note = a.store.objects.find(o => o.type === 'note');
+    r.noteClamped = note && note.x + note.w <= s0.x + s0.w + 0.01 && note.x >= s0.x - 0.01;
+    r.noteOffPage = a.offPageObjects().length;
+
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  check('a stroke run off the edge keeps only the ink that landed on paper',
+    clip.started && clip.strokeHasInk && clip.strokeStayedOn && clip.walkedPast, JSON.stringify(clip));
+  check('bringing the pen back onto the paper resumes the same stroke', clip.resumedOnReturn === true);
+  check('that stroke is still committed, and sits on the page',
+    clip.strokeCommitted && clip.strokeOffPage === 0, JSON.stringify(clip));
+  check('drawing in the gutter between sheets does nothing', clip.gutterRefused === true);
+  check('a note dropped past the edge slides back onto the paper',
+    clip.noteClamped && clip.noteOffPage === 0, JSON.stringify(clip));
+
+  const pad = await js(`
+    const a = window.app;
+    const { pageRects, PAGE_GAP } = await import('app://board/js/core/pages.js');
+    const r = {};
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    const first = pageRects(a.pages)[0];
+    r.startsAtOne = a.pageCount;
+    r.firstRectUnchanged = { x: first.x, y: first.y, w: first.w, h: first.h };
+
+    // ink on page 1, then add a page and put ink on that
+    a.store.add({ id: 'p1ink', type: 'shape', kind: 'rect', x: -100, y: -100, w: 200, h: 200,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 });
+    a.addPage();
+    r.afterAdd = a.pageCount;
+    r.onPage2 = a.currentPageIndex();
+    const second = pageRects(a.pages)[1];
+    r.gap = Math.round(second.y - (first.y + first.h));
+    r.expectedGap = PAGE_GAP;
+    a.store.add({ id: 'p2ink', type: 'shape', kind: 'rect', x: -100, y: second.y + 100, w: 200, h: 200,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 });
+    r.nothingLoose = a.offPageObjects().length;
+
+    // inserting a page BEFORE page 2 has to carry page 2's ink down with it
+    const inkBefore = { ...a.store.get('p2ink') };
+    a.addPage(0);
+    const inkAfter = a.store.get('p2ink');
+    r.pagesNow = a.pageCount;
+    r.inkRodeAlong = Math.round(inkAfter.y - inkBefore.y) === Math.round(first.h + PAGE_GAP);
+    r.stillNothingLoose = a.offPageObjects().length;
+
+    // one undo puts the whole insert back
+    a.command('edit.undo');
+    r.afterUndo = { pages: a.pageCount, y: Math.round(a.store.get('p2ink').y) };
+    r.undoRestored = r.afterUndo.pages === 2 && r.afterUndo.y === Math.round(inkBefore.y);
+
+    // page 1 never moves, whatever happens after it
+    r.firstStillAtOrigin = JSON.stringify(pageRects(a.pages)[0]) === JSON.stringify(r.firstRectUnchanged);
+
+    // duplicating a page copies its contents onto the new sheet
+    a.duplicatePage(0);
+    r.afterDuplicate = a.pageCount;
+    r.copies = a.store.objects.filter(o => o.type === 'shape' && Math.round(o.w) === 200).length;
+
+    // changing the paper size relays the strip and takes the ink with it
+    await a.setPageSize('a5', 'portrait');
+    r.allResized = a.pages.every(p => p.w === a.pages[0].w);
+    r.resizeKeptCount = a.pageCount;
+    r.looseAfterResize = a.offPageObjects().length;
+
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  check('a pad starts as a single sheet', pad.startsAtOne === 1);
+  check('adding a page puts you on it', pad.afterAdd === 2 && pad.onPage2 === 1, JSON.stringify(pad));
+  check('sheets are stacked with a gutter between them', pad.gap === pad.expectedGap, `${pad.gap} vs ${pad.expectedGap}`);
+  check('ink on each sheet belongs to that sheet', pad.nothingLoose === 0);
+  check('inserting a page carries the later pages\' ink down with it',
+    pad.inkRodeAlong && pad.stillNothingLoose === 0, JSON.stringify(pad));
+  check('one undo puts an inserted page and everything it moved back', pad.undoRestored === true, JSON.stringify(pad.afterUndo));
+  check('page one never moves, however many pages come after it', pad.firstStillAtOrigin === true);
+  check('duplicating a page copies what is on it', pad.afterDuplicate === 3 && pad.copies >= 2, JSON.stringify(pad));
+  check('changing the paper size resizes every sheet and keeps the ink on it',
+    pad.allResized && pad.resizeKeptCount === 3 && pad.looseAfterResize === 0, JSON.stringify(pad));
+
+  const padDel = await js(`
+    const a = window.app;
+    const r = {};
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    a.addPage(); a.addPage();
+    r.three = a.pageCount;
+    await a.deletePage(1);            // empty page, so no confirmation
+    r.two = a.pageCount;
+    a.command('edit.undo');
+    r.backToThree = a.pageCount;
+    // the last page cannot be deleted out from under you
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    const only = await a.deletePage(0);
+    r.lastPageKept = only === false && a.pageCount === 1;
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  const padTrip = await js(`
+    const a = window.app;
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    a.addPage(); a.addPage();
+    const { pageRects } = await import('app://board/js/core/pages.js');
+    const r3 = pageRects(a.pages)[2];
+    a.store.add({ id: 'last', type: 'shape', kind: 'rect', x: r3.x + 50, y: r3.y + 50, w: 100, h: 100,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 });
+    const saved = a.store.toJSON();
+    a.newBoard(true);
+    await a.loadBoard(saved, { silent: true, noMigrationPrompt: true });
+    const back = a.store.get('last');
+    const rr = pageRects(a.pages);
+    return {
+      savedPages: saved.pages.length,
+      loadedPages: a.pageCount,
+      objectBack: !!back && Math.round(back.y) === Math.round(r3.y + 50),
+      onThirdSheet: rr.length === 3 && back.y > rr[1].y + rr[1].h,
+      loose: a.offPageObjects().length
+    };
+  `);
+  check('a three-page pad survives a save and load intact',
+    padTrip.savedPages === 3 && padTrip.loadedPages === 3 && padTrip.objectBack
+      && padTrip.onThirdSheet && padTrip.loose === 0, JSON.stringify(padTrip));
+
+  check('a page can be deleted and undone', padDel.three === 3 && padDel.two === 2 && padDel.backToThree === 3, JSON.stringify(padDel));
+  check('a pad always keeps at least one page', padDel.lastPageKept === true);
+
+  const padCam = await js(`
+    const a = window.app;
+    const r = {};
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    const sf = a.surface;
+    // running away from the paper is not possible any more
+    sf.cam.panBy(-40000, -40000);
+    sf.clampCamera();
+    const { stripBounds } = await import('app://board/js/core/pages.js');
+    const b = stripBounds(a.pages);
+    const sx = b.x * sf.cam.z + sf.cam.x, sy = b.y * sf.cam.z + sf.cam.y;
+    const sw = b.w * sf.cam.z, sh = b.h * sf.cam.z;
+    r.paperStillOnScreen = sx + sw > 0 && sy + sh > 0 && sx < sf.width && sy < sf.height;
+
+    // and an infinite board is still free to roam
+    await a.setPageSize('infinite');
+    const before = sf.cam.x;
+    sf.cam.panBy(-40000, 0);
+    sf.clampCamera();
+    r.infiniteStillFree = Math.abs(sf.cam.x - (before - 40000)) < 0.01;
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  check('you cannot pan away from the paper until it is off screen', padCam.paperStillOnScreen === true);
+  check('an infinite board is still free to roam', padCam.infiniteStillFree === true);
+
+  /* ---- a pad exports as a real multi-page PDF ---- */
+  const padPdfPath = path.join(OUT, 'pad-3-pages.pdf');
+  const padPdf = await js(`
+    const a = window.app;
+    const { exportPdf, exportBoundsForTest } = await import('app://board/js/export.js');
+    const { pageRects } = await import('app://board/js/core/pages.js');
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    a.addPage(); a.addPage();
+    const rects = pageRects(a.pages);
+    // something identifiable on every sheet
+    rects.forEach((r2, i) => a.store.add({
+      id: 'pp' + i, type: 'shape', kind: 'rect',
+      x: r2.x + 60, y: r2.y + 60 + i * 40, w: r2.w - 120, h: 200,
+      rotation: 0, stroke: '#000', fill: 'none', lineWidth: 3
+    }));
+    const bounds = [0, 1, 2].map(i => exportBoundsForTest(a, i));
+    await exportPdf(a, { filePath: ${JSON.stringify(padPdfPath)}, quality: 1 });
+    return { pages: a.pageCount, bounds, off: a.offPageObjects().length };
+  `);
+  const padPdfBuf = await fs.readFile(padPdfPath).catch(() => null);
+  const padPdfText = padPdfBuf ? padPdfBuf.toString('latin1') : '';
+  const padBoxes = [...padPdfText.matchAll(/\/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/g)]
+    .map((m) => ({ w: +m[3] - +m[1], h: +m[4] - +m[2] }));
+  const padPdfPages = (padPdfText.match(/\/Type\s*\/Page[^s]/g) || []).length;
+  const padMm = (pt) => (pt / 72) * 25.4;
+
+  check('every sheet of a pad exports as its own PDF page',
+    padPdfPages === 3, `${padPdfPages} PDF pages for ${padPdf.pages} board pages`);
+  check('each exported PDF page really is A4 portrait, not a tile of a big canvas',
+    padBoxes.length === 3 && padBoxes.every((b) => Math.abs(padMm(b.w) - 210) < 1.5 && Math.abs(padMm(b.h) - 297) < 1.5),
+    JSON.stringify(padBoxes.map((b) => [Math.round(padMm(b.w)), Math.round(padMm(b.h))])));
+  check('each sheet exports its own rectangle',
+    padPdf.bounds.length === 3
+      && padPdf.bounds[1].y > padPdf.bounds[0].y
+      && padPdf.bounds[2].y > padPdf.bounds[1].y
+      && padPdf.bounds.every((b) => Math.abs(b.w - 794) < 2),
+    JSON.stringify(padPdf.bounds.map((b) => Math.round(b.y))));
+  check('nothing on a three-page pad ends up off the paper', padPdf.off === 0);
+
 
   check('an imported page is scaled to land on the sheet',
     offpage.imported && offpage.imported.w <= offpage.page.w && offpage.imported.h <= offpage.page.h,

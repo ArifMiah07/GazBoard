@@ -117,7 +117,45 @@ export function initToolbar(app) {
     el.addEventListener('click', () => app.command(name));
   }
   document.getElementById('zoomLabel').addEventListener('click', () => app.command('zoomReset'));
+
+  initPagebar(app);
 }
+
+/* ------------------------------------------------------------------ *
+ *  The page navigator
+ *
+ *  Only ever shown on a pad. On an infinite board there are no pages to
+ *  step through, and a control that is permanently disabled is just clutter.
+ * ------------------------------------------------------------------ */
+function initPagebar(app) {
+  const bar = document.getElementById('pagebar');
+  if (!bar) return;
+  const btn = (k) => bar.querySelector(`[data-page="${k}"]`);
+  btn('prev').innerHTML = icon('back', 18);
+  btn('next').innerHTML = `<span style="display:flex;transform:rotate(180deg)">${icon('back', 18)}</span>`;
+  btn('add').innerHTML = icon('insert', 18);
+  btn('more').innerHTML = icon('more', 18);
+
+  btn('prev').addEventListener('click', () => app.command('page.prev'));
+  btn('next').addEventListener('click', () => app.command('page.next'));
+  btn('add').addEventListener('click', () => app.command('page.add'));
+  document.getElementById('pageLabel').addEventListener('click', () => app.command('view.fitPage'));
+
+  btn('more').addEventListener('click', (e) => {
+    const last = app.pageCount <= 1;
+    openPopover(e.currentTarget, h('div', { class: 'menu' },
+      menuItem('Add a page after this one', 'insert', () => app.command('page.add')),
+      menuItem('Duplicate this page', 'duplicate', () => app.command('page.duplicate')),
+      menuItem('Fit the whole pad in the window', 'fit', () => app.command('view.fitAllPages')),
+      menuItem('Fit everything onto the paper', 'shapes', () => app.command('page.fitContent')),
+      h('div', { class: 'menu-sep' }),
+      menuItem('Delete this page', 'trash', () => app.command('page.delete'), { danger: true, disabled: last })
+    ), { align: 'end' });
+  });
+}
+
+/** Reflect the current page in the navigator. Called from syncToolbar. */
+function syncPagebar(app) { app.syncPageLabel(); }
 
 /* ------------------------------------------------------------------ */
 /** Move the `active` marker to `el` immediately - the popover stays open, so
@@ -342,7 +380,7 @@ export function openExportPopover(app, anchor) {
     menuItem('Export selection as PNG…', 'image', () => app.command('export.pngSelection'), { disabled: !app.surface.selection.size }),
     menuItem('Export as PDF…', 'doc', () => app.command('export.pdf')),
     menuItem('Export as SVG…', 'export', () => app.command('export.svg')),
-    menuItem('Fit everything onto the page', 'shapes', () => app.command('page.fitContent'), { disabled: !app.store.doc.page }),
+    menuItem('Fit everything onto the paper', 'shapes', () => app.command('page.fitContent'), { disabled: !app.store.pageCount }),
     h('div', { class: 'menu-sep' }),
     menuItem('Save a copy (.gazboard)…', 'doc', () => app.command('board.save'), { key: 'Ctrl+S' }),
     menuItem('Open a board file…', 'board', () => app.command('board.open'), { key: 'Ctrl+O' })
@@ -354,6 +392,8 @@ export function openExportPopover(app, anchor) {
 export function syncToolbar(app) {
   const bar = document.getElementById('toolbar');
   const s = app.settings;
+
+  syncPagebar(app);
 
   for (const b of bar.querySelectorAll('.pen[data-pen]')) {
     const pen = PENS.find((p) => p.id === b.dataset.pen);

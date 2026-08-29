@@ -2,7 +2,8 @@
 
 import { Camera } from './camera.js';
 import { drawBackground, drawObject, drawSelection, drawMemberOutline, drawLockBadge, FONT } from './render.js';
-import { worldBounds } from './store.js';
+import { worldBounds, boundsOf } from './store.js';
+import { pageRects, pageIndexForBox, stripBounds } from './pages.js';
 import { boxesIntersect } from './util.js';
 
 export class Surface {
@@ -123,7 +124,8 @@ export class Surface {
     if (!w || !h) return;
 
     this.screenTransform();
-    drawBackground(ctx, this.store.doc.background, cam, w, h, this.store.doc.page);
+    const pages = this.store.doc.pages;
+    drawBackground(ctx, this.store.doc.background, cam, w, h, pages);
 
     ctx.setTransform(this.dpr * cam.z, 0, 0, this.dpr * cam.z, this.dpr * cam.x, this.dpr * cam.y);
 
@@ -132,13 +134,50 @@ export class Surface {
     const vbox = { x: view.x - pad, y: view.y - pad, w: view.w + pad * 2, h: view.h + pad * 2 };
     const onload = () => this.invalidate();
 
+    const visible = [];
     for (const o of this.store.objects) {
       if (!o) continue;
       if (!boxesIntersect(vbox, worldBounds(o))) continue;
-      drawObject(ctx, o, onload);
+      visible.push(o);
     }
 
-    if (this.wet) drawObject(ctx, this.wet, onload);
+    if (!pages.length) {
+      for (const o of visible) drawObject(ctx, o, onload);
+    } else {
+      // Each sheet clips its own contents, so ink can never spill into the
+      // gutter or onto a neighbouring page. Objects that belong to no sheet
+      // are legacy content from a board saved before clipping existed and the
+      // user chose to keep - they stay visible on the desk rather than
+      // vanishing, which is the whole point of having asked.
+      const rects = pageRects(pages);
+      const buckets = rects.map(() => []);
+      const loose = [];
+      for (const o of visible) {
+        const i = pageIndexForBox(pages, boundsOf(o));
+        if (i >= 0) buckets[i].push(o); else loose.push(o);
+      }
+      for (const o of loose) drawObject(ctx, o, onload);
+      for (let i = 0; i < rects.length; i++) {
+        if (!buckets[i].length) continue;
+        const r = rects[i];
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(r.x, r.y, r.w, r.h);
+        ctx.clip();
+        for (const o of buckets[i]) drawObject(ctx, o, onload);
+        ctx.restore();
+      }
+    }
+
+    if (this.wet) {
+      const wi = pages.length ? pageIndexForBox(pages, boundsOf(this.wet)) : -1;
+      if (wi >= 0) {
+        const r = pageRects(pages)[wi];
+        ctx.save(); ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
+        drawObject(ctx, this.wet, onload);
+        ctx.restore();
+      } else drawObject(ctx, this.wet, onload);
+    }
 
     // ---- screen-space overlays (CSS pixels) ----
     this.screenTransform();
@@ -172,6 +211,29 @@ export class Surface {
     for (const fn of this.overlays) fn(ctx, this);
   }
 
+  /**
+   * Keep the pad reachable.
+   *
+   * On an infinite board the camera is free, because there is nothing to lose
+   * sight of. On a pad, panning far enough leaves nothing on screen but empty
+   * desk with no clue which way the paper went - so the strip is held to at
+   * least a strip of KEEP pixels inside the window. It never fights ordinary
+   * panning; it only refuses to let the last of the paper leave.
+   */
+  clampCamera() {
+    const pages = this.store.doc.pages;
+    if (!pages.length || !this.width || !this.height) return;
+    const b = stripBounds(pages);
+    if (!b) return;
+    const { cam } = this;
+    const sw = b.w * cam.z, sh = b.h * cam.z;
+    const keepX = Math.min(160, sw), keepY = Math.min(160, sh);
+    const loX = keepX - b.x * cam.z - sw, hiX = this.width - keepX - b.x * cam.z;
+    const loY = keepY - b.y * cam.z - sh, hiY = this.height - keepY - b.y * cam.z;
+    if (loX <= hiX) cam.x = Math.max(loX, Math.min(cam.x, hiX));
+    if (loY <= hiY) cam.y = Math.max(loY, Math.min(cam.y, hiY));
+  }
+
   /** Render the board (or a region) to an offscreen canvas - used by export. */
   renderTo(box, scale = 2, background = true) {
     const c = document.createElement('canvas');
@@ -183,10 +245,20 @@ export class Surface {
       ctx.fillRect(0, 0, c.width, c.height);
     }
     ctx.setTransform(scale, 0, 0, scale, -box.x * scale, -box.y * scale);
+    const pages = this.store.doc.pages;
+    const rects = pageRects(pages);
     for (const o of this.store.objects) {
       if (!o) continue;
       if (!boxesIntersect(box, worldBounds(o))) continue;
-      drawObject(ctx, o);
+      // an export has to clip exactly as the screen does, or a stroke that
+      // runs off the paper would reappear in the PDF
+      const i = rects.length ? pageIndexForBox(pages, boundsOf(o)) : -1;
+      if (i >= 0) {
+        const r = rects[i];
+        ctx.save(); ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
+        drawObject(ctx, o);
+        ctx.restore();
+      } else drawObject(ctx, o);
     }
     return c;
   }

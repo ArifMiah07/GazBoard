@@ -90,9 +90,10 @@ export function createPanels(app) {
       const custom = h('input', { type: 'color', value: bg.color });
       custom.addEventListener('input', () => app.store.setBackground({ color: custom.value }));
 
-      // Canvas size. Infinite is the default and always will be; a page is a
-      // sheet drawn at the origin that exports default to. Nothing is clipped.
-      const page = app.store.doc.page;
+      // Canvas size. Infinite is the default and always will be. Choosing a
+      // paper size turns the board into a pad: ink is clipped to the sheet and
+      // pages can be added, the way a notebook works.
+      const page = app.store.page;
       const current = page ? paperForPage(page) : null;
       const orientation = current ? current.orientation : (app.settings.pageOrientation || 'portrait');
 

@@ -31,6 +31,14 @@
     <!-- built in js/ui/toolbar.js so the pen tray is data-driven -->
     <nav id="toolbar" role="toolbar" aria-label="Whiteboard tools"></nav>
 
+    <div id="pagebar" hidden>
+      <button data-page="prev" title="Previous page (Page Up)"></button>
+      <button id="pageLabel" title="Fit this page in the window">Page 1 of 1</button>
+      <button data-page="next" title="Next page (Page Down)"></button>
+      <button data-page="add" title="Add a page"></button>
+      <button data-page="more" title="More page actions"></button>
+    </div>
+
     <div id="zoombar">
       <button data-cmd="zoomOut" title="Zoom out"></button>
       <button id="zoomLabel" title="Reset zoom">100%</button>

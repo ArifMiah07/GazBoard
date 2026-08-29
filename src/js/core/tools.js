@@ -1,6 +1,6 @@
 // Pointer interaction: one small state machine covering every tool.
 
-import { uid, bboxOfPoints, clamp, dist, simplify } from './util.js';
+import { uid, bboxOfPoints, clamp, dist, simplify, unionBox } from './util.js';
 import { boundsOf, worldBounds, withAttached } from './store.js';
 import { pick, inBox, inLasso, strokesAlong, normalizeBox } from './hit.js';
 import { handlePositions, HANDLE, HANDLES, drawShape } from './render.js';
@@ -8,6 +8,7 @@ import { translateObject, scaleObject, rotateObjectAround, normalizeRect, anchor
 import { recognize, fitError, MAX_FIT_ERROR } from './recognize.js';
 import { splitStroke } from './erase.js';
 import { inkCursor } from './cursors.js';
+import { pageRects, pageIndexAt, pageIndexForBox, nearestPageIndex, offsetIntoRect, inRect } from './pages.js';
 
 const TAP_SLOP = 4;
 const HANDLE_GRAB = 12;   // forgiving grab radius around a handle's 9px dot
@@ -202,22 +203,29 @@ export class Interaction {
       case 'pan': {
         this.surface.cam.x = a.cam.x + (sp.x - a.sp.x);
         this.surface.cam.y = a.cam.y + (sp.y - a.sp.y);
+        this.surface.clampCamera();
         break;
       }
       case 'draw': {
+        // The pen leaving the paper does not end the stroke - the points that
+        // land off the sheet are simply not picked up, and drawing resumes if
+        // it comes back on, exactly as ink behaves at the edge of a page.
+        const keep = (q) => !a.sheet || inRect(a.sheet, q.x, q.y);
         const pt = this.snapToRuler({ ...wp, p: pressure }, a);
         const last = a.obj.points[a.obj.points.length - 1];
         if (!last || dist(last, pt) * this.surface.cam.z > 1.2) {
           // coalesced events give smoother ink on high-rate pens
           const evs = e && e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+          let added = false;
           if (evs && evs.length) {
             for (const ce of evs) {
               const csp = this.surface.screenPoint(ce);
               const cwp = this.surface.cam.toWorld(csp.x, csp.y);
-              a.obj.points.push(this.snapToRuler({ ...cwp, p: this.pressure(ce) }, a));
+              const cp = this.snapToRuler({ ...cwp, p: this.pressure(ce) }, a);
+              if (keep(cp)) { a.obj.points.push(cp); added = true; }
             }
-          } else a.obj.points.push(pt);
-          a.obj.bbox = bboxOfPoints(a.obj.points);
+          } else if (keep(pt)) { a.obj.points.push(pt); added = true; }
+          if (added) a.obj.bbox = bboxOfPoints(a.obj.points);
         }
         break;
       }
@@ -240,6 +248,7 @@ export class Interaction {
           const b = a.origin.get(o.id);
           translateObject(o, b.x + dx - boundsOf(o).x, b.y + dy - boundsOf(o).y);
         }
+        this.clampGroupToPaper(a.objs);
         break;
       }
       case 'resize': {
@@ -262,6 +271,7 @@ export class Interaction {
           Object.assign(o, structuredClone(a.origin.get(o.id)));
           scaleObject(o, sx, sy, anchor.x, anchor.y);
         }
+        this.clampGroupToPaper(a.objs);
         break;
       }
       case 'rotate': {
@@ -272,6 +282,7 @@ export class Interaction {
           Object.assign(o, structuredClone(a.origin.get(o.id)));
           rotateObjectAround(o, ang, c.x, c.y);
         }
+        this.clampGroupToPaper(a.objs);
         a.angle = ang;
         break;
       }
@@ -431,6 +442,49 @@ export class Interaction {
     this.action = { type: 'marquee', start: wp, cur: wp, additive: e.shiftKey };
   }
 
+  /* ------------------------------------------------------------ *
+   *  Paper
+   *
+   *  On a pad the sheet is a real boundary, not a hint: ink stops at the
+   *  edge and objects cannot be dragged off it. Input is clamped here AND
+   *  the renderer clips to the sheet - the two together mean a stroke that
+   *  runs off the paper is neither stored outside it nor painted outside
+   *  it, however the gesture arrives.
+   * ------------------------------------------------------------ */
+  get pages() { return this.store.doc.pages; }
+
+  /** The sheet under a world point. Null on an infinite board or in a gutter. */
+  sheetAt(wp) {
+    const pages = this.pages;
+    if (!pages.length) return null;
+    const i = pageIndexAt(pages, wp.x, wp.y);
+    return i < 0 ? null : pageRects(pages)[i];
+  }
+
+  /** False only when the board has sheets and this point misses all of them. */
+  onPaper(wp) { return !this.pages.length || pageIndexAt(this.pages, wp.x, wp.y) >= 0; }
+
+  /** Nudge one new object onto the sheet it was dropped nearest. */
+  placeOnPaper(obj) { this.clampGroupToPaper([obj]); return obj; }
+
+  /**
+   * Slide a group back onto its sheet, keeping the objects' relative
+   * positions - clamping each one separately would shear a multi-selection
+   * apart the moment it touched an edge.
+   */
+  clampGroupToPaper(objs) {
+    const pages = this.pages;
+    if (!pages.length || !objs || !objs.length) return;
+    const rects = pageRects(pages);
+    let b = null;
+    for (const o of objs) b = unionBox(b, boundsOf(o));
+    if (!b) return;
+    let i = pageIndexForBox(pages, b);
+    if (i < 0) i = nearestPageIndex(pages, b.x + b.w / 2, b.y + b.h / 2);
+    const { dx, dy } = offsetIntoRect(b, rects[i]);
+    if (dx || dy) for (const o of objs) translateObject(o, dx, dy);
+  }
+
   startStroke(e, wp, tool) {
     const s = this.app.settings;
     const isHl = tool === 'highlighter';
@@ -443,10 +497,13 @@ export class Interaction {
       opacity: isHl ? 0.38 : 1,
       points: [], bbox: { x: wp.x, y: wp.y, w: 0, h: 0 }, rotation: 0
     };
+    // starting in the gutter is drawing on the desk: nothing happens
+    const sheet = this.sheetAt(wp);
+    if (this.pages.length && !sheet) return;
     const first = this.snapToRuler({ ...wp, p: this.pressure(e) }, null);
     obj.points.push(first);
     this.surface.wet = obj;
-    this.action = { type: 'draw', obj, snapAxis: null };
+    this.action = { type: 'draw', obj, snapAxis: null, sheet };
   }
 
   finishStroke(a) {
@@ -634,7 +691,7 @@ export class Interaction {
       id: uid('sh'), type: 'shape', kind, ...geo, rotation: 0,
       stroke: s.shapeStroke, fill: s.shapeFill, lineWidth: s.shapeLineWidth, dash: s.shapeDash, text: ''
     };
-    this.store.add(obj, 'shape');
+    this.store.add(this.placeOnPaper(obj), 'shape');
     if (this.app.settings.returnToSelect) this.app.setTool('select');
     this.app.setSelection([obj.id]);
   }
@@ -646,6 +703,7 @@ export class Interaction {
       id: uid('n'), type: 'note', x: wp.x - size / 2, y: wp.y - size / 2, w: size, h: size,
       color: s.noteColor, text: '', rotation: 0, align: 'center', font: s.noteFont || 'ui'
     };
+    this.placeOnPaper(obj);
     obj.attachedTo = this.lockedHostFor(obj) || undefined;
     this.store.add(obj, 'note');
     // switch tools BEFORE opening the editor: setTool commits any open edit,
@@ -668,6 +726,7 @@ export class Interaction {
       color: s.textColor, fontSize, align: 'left', valign: 'top',
       font: s.textFont || 'ui', background: 'none'
     };
+    this.placeOnPaper(obj);
     obj.attachedTo = this.lockedHostFor(obj) || undefined;
     this.store.add(obj, 'text');
     this.app.armToolRestore();
@@ -753,6 +812,7 @@ export class Interaction {
     // scrolling mid-gesture moves the canvas under the pen rather than zooming
     if (this.action && Interaction.EDGE_PANNABLE.has(this.action.type)) {
       this.surface.cam.panBy(-(e.deltaX || 0), -(e.deltaY || 0));
+      this.surface.clampCamera();
       this.trackCanvasMove();
       this.surface.invalidate();
       return;
@@ -772,6 +832,7 @@ export class Interaction {
       if (isTrackpad && !this.app.settings.wheelZoom) this.surface.cam.panBy(-e.deltaX, -e.deltaY);
       else this.surface.cam.zoomAt(sp.x, sp.y, Math.exp(-e.deltaY * 0.0018));
     }
+    this.surface.clampCamera();
     this.app.syncZoom();
     this.surface.invalidate();
   }
@@ -793,6 +854,7 @@ export class Interaction {
     const s = this.secondaryPan;
     this.surface.cam.x = s.cam.x + (sp.x - s.sp.x);
     this.surface.cam.y = s.cam.y + (sp.y - s.sp.y);
+    this.surface.clampCamera();
     this.trackCanvasMove();
     this.app.syncZoom();
     this.surface.invalidate();
@@ -839,6 +901,7 @@ export class Interaction {
       const v = this.edgeVelocity(this.lastMotion.sp);
       if (!v) return;
       this.surface.cam.panBy(v.vx, v.vy);
+      this.surface.clampCamera();
       this.trackCanvasMove();
       this.app.syncZoom();
       this.surface.invalidate();
@@ -873,6 +936,7 @@ export class Interaction {
     cam.x = p.cam.x; cam.y = p.cam.y; cam.z = p.cam.z;
     cam.panBy(c.x - p.c0.x, c.y - p.c0.y);
     cam.zoomAt(c.x, c.y, d / p.d0);
+    this.surface.clampCamera();
     this.app.syncZoom();
     this.surface.invalidate();
   }

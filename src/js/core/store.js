@@ -8,15 +8,16 @@
 // in the app mutates the document directly.
 
 import { uid, unionBox } from './util.js';
+import { pagesFrom, pageRects } from './pages.js';
 
 export const CLIENT_ID = uid('c');
 
 export function emptyDoc(name = 'Untitled board') {
   return {
-    id: uid('b'), name, schema: 1,
+    id: uid('b'), name, schema: 2,
     created: Date.now(), modified: Date.now(),
     background: { color: '#ffffff', pattern: 'none', patternColor: '#c8c6c4' },
-    page: null,                    // null = infinite canvas; {w,h} = a fixed sheet
+    pages: [],                     // [] = infinite canvas; [{w,h},…] = a strip of sheets
     camera: { x: 0, y: 0, z: 1 },
     objects: {},   // id -> object
     order: []      // z-order, back to front
@@ -196,16 +197,29 @@ export class Store {
     this.commit(label, ops);
   }
 
+  /** The first sheet, or null on an infinite board. */
+  get page() { return this.doc.pages[0] || null; }
+  get pages() { return this.doc.pages; }
+  get pageCount() { return this.doc.pages.length; }
+  get pageRects() { return pageRects(this.doc.pages); }
+
   /**
-   * The board is infinite by default. Setting a page draws a sheet of that size
-   * at the origin and makes exports default to it. Ink is never clipped - you
-   * can still draw outside, it just sits visibly off the page.
+   * The board is infinite by default. Giving it pages draws sheets stacked top
+   * to bottom from the origin; ink is then clipped to the paper, the way it is
+   * on a real pad. An empty array puts the infinite canvas back.
    *
-   * @param {{w:number,h:number}|null} page  world units, or null for infinite
+   * @param {Array<{w:number,h:number}>} pages  world units
    */
-  setPage(page) {
-    const before = this.doc.page ? { ...this.doc.page } : null;
-    this.commit('page size', [{ t: 'doc', before: { page: before }, after: { page: page ? { ...page } : null } }]);
+  setPages(pages, label = 'page size') {
+    const before = this.doc.pages.map((p) => ({ ...p }));
+    const after = (pages || []).map((p) => ({ w: p.w, h: p.h }));
+    this.commit(label, [{ t: 'doc', before: { pages: before }, after: { pages: after } }]);
+  }
+
+  /** An op that swaps the page list - for callers batching page edits with object moves. */
+  pagesOp(pages) {
+    return { t: 'doc', before: { pages: this.doc.pages.map((p) => ({ ...p })) },
+      after: { pages: (pages || []).map((p) => ({ w: p.w, h: p.h })) } };
   }
 
   setBackground(patch) {
@@ -274,9 +288,12 @@ export class Store {
 
   toJSON(extra) {
     const d = this.doc;
-    return { id: d.id, name: d.name, schema: 1, created: d.created, modified: d.modified,
-      background: d.background, page: d.page || null, camera: d.camera,
-      objects: d.order.map((id) => d.objects[id]).filter(Boolean), ...extra };
+    // `page` is written alongside `pages` so a board saved here still opens on
+    // a build from before multi-page: it sees the first sheet and ignores the
+    // rest, which beats falling back to an infinite canvas.
+    return { id: d.id, name: d.name, schema: 2, created: d.created, modified: d.modified,
+      background: d.background, pages: d.pages.map((p) => ({ ...p })), page: d.pages[0] || null,
+      camera: d.camera, objects: d.order.map((id) => d.objects[id]).filter(Boolean), ...extra };
   }
 
   /** Start a brand new empty document. */
@@ -293,7 +310,7 @@ export class Store {
     d.created = data.created || Date.now();
     d.modified = data.modified || Date.now();
     d.background = { ...d.background, ...(data.background || {}) };
-    d.page = data.page || null;
+    d.pages = pagesFrom(data);
     d.camera = data.camera || d.camera;
     const list = Array.isArray(data.objects) ? data.objects
       : Array.isArray(data.objectList) ? data.objectList

@@ -1,16 +1,24 @@
 // Exporting: PNG bitmap, SVG vector, and the .gazboard document format.
 
 import { worldBounds } from './core/store.js';
+import { pageRects } from './core/pages.js';
 import { wrapText } from './core/util.js';
 import { layoutPages } from './ui/pdfdialog.js';
 import { FONT, faceOf } from './core/render.js';
 
-function exportBounds(app, pad = 60) {
-  // On a fixed sheet the sheet IS the export: that is the whole point of
-  // choosing one. Anything drawn off the paper is left out, the same as it
-  // would be on a printer.
-  const page = app.store.doc.page;
-  if (page && page.w && page.h) return { x: -page.w / 2, y: -page.h / 2, w: page.w, h: page.h };
+/**
+ * What a bitmap or vector export covers.
+ *
+ * On a pad the sheet IS the export - that is the whole point of choosing one -
+ * so this returns one sheet's rectangle. Which sheet is the caller's business:
+ * PNG and SVG default to the one you are looking at, PDF walks all of them.
+ */
+function exportBounds(app, pad = 60, pageIndex = null) {
+  const rects = pageRects(app.store.doc.pages);
+  if (rects.length) {
+    const i = pageIndex == null ? Math.max(0, app.currentPageIndex()) : pageIndex;
+    return { ...rects[Math.min(Math.max(i, 0), rects.length - 1)] };
+  }
   const b = app.store.contentBounds();
   if (!b) {
     const v = app.surface.cam.viewport(app.surface.width, app.surface.height);
@@ -20,7 +28,7 @@ function exportBounds(app, pad = 60) {
 }
 
 /** Exposed so the suite can check what an export would cover. */
-export const exportBoundsForTest = (app) => exportBounds(app);
+export const exportBoundsForTest = (app, pageIndex = null) => exportBounds(app, 60, pageIndex);
 
 export async function exportPng(app, { scale = 2, transparent = false, selectionOnly = false } = {}) {
   let box;
@@ -159,6 +167,12 @@ function textSvg(meas, text, x, y, w, h, opt, rot) {
 const MM_PER_PX = 25.4 / 96;
 
 export async function exportPdf(app, opts) {
+  // A pad exports as itself: one PDF page per board page, at the board's own
+  // paper size. The tiling path below is for infinite boards, which have no
+  // page boundaries of their own and have to be cut into sheets somehow.
+  const padRects = pageRects(app.store.doc.pages);
+  if (padRects.length) return exportPadPdf(app, opts, padRects);
+
   const box = exportBounds(app, 40);
   const L = layoutPages(box, opts);
   const sheets = L.cols * L.rows;
@@ -208,6 +222,47 @@ export async function exportPdf(app, opts) {
     await window.board.writeFile(filePath, res.data);
     progress.close();
     app.toast(`Exported ${filePath.split(/[\\/]/).pop()} — ${sheets} page${sheets === 1 ? '' : 's'}`);
+    return filePath;
+  } catch (e) {
+    progress.close();
+    app.toast('PDF export failed: ' + e.message);
+    return null;
+  }
+}
+
+/** Every sheet of the pad, in order, as the pages of one PDF. */
+async function exportPadPdf(app, opts, rects) {
+  const filePath = opts.filePath || await window.board.saveDialog({
+    title: 'Export as PDF',
+    defaultPath: safeName(app.store.doc.name) + '.pdf',
+    filters: [{ name: 'PDF document', extensions: ['pdf'] }]
+  });
+  if (!filePath) return null;
+
+  const n = rects.length;
+  const progress = app.showProgress('Exporting PDF', n > 1 ? `0 of ${n} pages` : 'Rendering…');
+  try {
+    const first = rects[0];
+    const pages = [];
+    for (let i = 0; i < n; i++) {
+      const r = rects[i];
+      const want = opts.quality || 2;
+      const longest = Math.max(r.w, r.h);
+      const q = longest * want > 10000 ? 10000 / longest : want;
+      const canvas = app.surface.renderTo(r, q, true);
+      pages.push({ src: canvas.toDataURL('image/png'), wMm: r.w * MM_PER_PX, hMm: r.h * MM_PER_PX });
+      progress.update((i + 1) / n, n > 1 ? `${i + 1} of ${n} pages` : 'Rendering…');
+      await new Promise((r2) => setTimeout(r2, 0));         // let the UI breathe
+    }
+
+    progress.update(0.95, 'Writing the PDF…');
+    const pageW = first.w * MM_PER_PX, pageH = first.h * MM_PER_PX;
+    const L = { pageW, pageH, innerW: pageW, innerH: pageH, margin: 0 };
+    const res = await window.board.exportPdf({ html: pdfHtml(pages, L), widthIn: pageW / 25.4, heightIn: pageH / 25.4 });
+    if (!res.ok) { progress.close(); app.toast(res.error || 'PDF export failed'); return null; }
+    await window.board.writeFile(filePath, res.data);
+    progress.close();
+    app.toast(`Exported ${filePath.split(/[\\/]/).pop()} — ${n} page${n === 1 ? '' : 's'}`);
     return filePath;
   } catch (e) {
     progress.close();

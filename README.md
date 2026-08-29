@@ -1,12 +1,18 @@
+<div align="center">
+  
 # GazBoard
 
-A free-form digital whiteboard for Windows, macOS and Linux — an offline rebuild of the
-classic **Microsoft Whiteboard 21.x** experience, with one deliberate difference: **there is
-no Microsoft sign-in and no cloud.** Everything runs locally. On top of the original feature
-set it can **import Word, PowerPoint and PDF files** onto the canvas as pages you draw over.
+**A free-form whiteboard that runs entirely on your own computer.**
+
+</div>
+
+A free-form digital whiteboard for Windows and Linux — an offline rebuild of the classic **Microsoft Whiteboard 21.x** experience, with one deliberate difference: **there is no Microsoft sign-in and no cloud.** 
+
+Everything runs locally. On top of the original feature set it can **import Word, PowerPoint and PDF files** onto the canvas as pages you draw over.
 
 ![Six pens, a highlighter, and pressure-sensitive ink with no smoothing](Screenshots/gazboardpens.png)
 
+[**Download the latest version**](https://github.com/fahim9778/GazBoard/releases/latest)
 ---
 
 ## Running it
@@ -295,4 +301,4 @@ export and settings are all here.
 
 MIT licensed. Not affiliated with or endorsed by Microsoft.
 
-*by theBoringCode — created with ♥ with Claude Cowork*
+*by theBoringCodes — Co-created with ♥ with Claude Cowork*

@@ -5,7 +5,7 @@ classic **Microsoft Whiteboard 21.x** experience, with one deliberate difference
 no Microsoft sign-in and no cloud.** Everything runs locally. On top of the original feature
 set it can **import Word, PowerPoint and PDF files** onto the canvas as pages you draw over.
 
-![toolbar](test/out/01-board.png)
+![Six pens, a highlighter, and pressure-sensitive ink with no smoothing](Screenshots/gazboardpens.png)
 
 ---
 

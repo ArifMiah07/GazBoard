@@ -1,7 +1,5 @@
 # GazBoard
 
-*by theBoringCode — created with ♥ with Claude Cowork*
-
 A free-form digital whiteboard for Windows, macOS and Linux — an offline rebuild of the
 classic **Microsoft Whiteboard 21.x** experience, with one deliberate difference: **there is
 no Microsoft sign-in and no cloud.** Everything runs locally. On top of the original feature
@@ -275,3 +273,5 @@ Bing image search, and the Teams meeting integration. Ink, canvas, objects, temp
 export and settings are all here.
 
 MIT licensed. Not affiliated with or endorsed by Microsoft.
+
+*by theBoringCode — created with ♥ with Claude Cowork*

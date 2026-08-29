@@ -1,0 +1,119 @@
+# Builds GazBoard for Windows and Linux and publishes a GitHub Release.
+#
+# To cut a release:
+#     git tag v1.16.1
+#     git push origin v1.16.1
+#
+# You can also run it by hand from the Actions tab (Run workflow), which builds
+# and uploads the artifacts without creating a Release - do that first whenever
+# you change something, so a broken build never becomes a public download.
+#
+# On a public repository this costs nothing: GitHub-hosted runners are free for
+# public repos, Windows included.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed to create the Release and upload files to it
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the test suite
+        run: npx electron . --smoke
+        # a failed assertion exits non-zero, so a broken build never ships
+
+      - name: Build the installer
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Upload build output as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GazBoard-windows
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+          if-no-files-found: error
+
+      - name: Attach to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.exe
+            dist/*.blockmap
+          name: GazBoard ${{ github.ref_name }}
+          generate_release_notes: true
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the test suite
+        run: xvfb-run -a npx electron . --smoke --no-sandbox
+
+      - name: Build the AppImage and .deb
+        run: npx electron-builder --linux AppImage deb --x64 --publish never
+
+      # Proof the packaged AppImage really starts, not just that it built. The
+      # screenshot ships with the artifacts, so it can be checked from any
+      # machine - useful when you have no Linux box to hand.
+      - name: Boot the AppImage and photograph it
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq imagemagick libfuse2 xvfb
+          chmod +x dist/*.AppImage
+          cat > /tmp/boot.sh <<'SH'
+          #!/bin/bash
+          dist/*.AppImage --no-sandbox --disable-gpu > /tmp/appimage.log 2>&1 &
+          PID=$!
+          sleep 20
+          import -window root dist/linux-boot-screenshot.png
+          kill $PID 2>/dev/null || true
+          SH
+          chmod +x /tmp/boot.sh
+          xvfb-run -a --server-args="-screen 0 1440x900x24" /tmp/boot.sh
+          test -s dist/linux-boot-screenshot.png || { echo "the AppImage did not draw anything"; cat /tmp/appimage.log; exit 1; }
+          echo "AppImage booted and rendered"
+
+      - name: Upload build output as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GazBoard-linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/linux-boot-screenshot.png
+          if-no-files-found: error
+
+      - name: Attach to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.AppImage
+            dist/*.deb
+          name: GazBoard ${{ github.ref_name }}
+          generate_release_notes: true

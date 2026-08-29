@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' app: data: blob:; script-src 'self' app:; style-src 'self' app: 'unsafe-inline'; img-src 'self' app: data: blob:; font-src 'self' app: data:; worker-src 'self' app: blob:;">
+<title>GazBoard</title>
+<link rel="stylesheet" href="./css/app.css">
+<script src="./js/errors.js"></script>
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <button class="tb-btn" id="btnBoards" title="My boards"></button>
+    <input id="boardTitle" value="Untitled board" spellcheck="false" aria-label="Board name">
+    <span class="badge" id="savedBadge">Saved</span>
+    <div class="spacer"></div>
+    <button class="tb-btn" id="btnTemplates" title="Templates"></button>
+    <button class="tb-btn" id="btnBackground" title="Format background"></button>
+    <button class="tb-btn" id="btnExport" title="Export"></button>
+    <button class="tb-btn" id="btnSettings" title="Settings"></button>
+    <button class="tb-btn" id="btnHelp" title="Keyboard shortcuts"></button>
+  </header>
+
+  <main id="stage">
+    <canvas id="c"></canvas>
+    <div id="editLayer"></div>
+
+    <div id="ctxbar"></div>
+
+    <!-- built in js/ui/toolbar.js so the pen tray is data-driven -->
+    <nav id="toolbar" role="toolbar" aria-label="Whiteboard tools"></nav>
+
+    <div id="zoombar">
+      <button data-cmd="zoomOut" title="Zoom out"></button>
+      <button id="zoomLabel" title="Reset zoom">100%</button>
+      <button data-cmd="zoomIn" title="Zoom in"></button>
+      <button data-cmd="fit" title="Fit to board"></button>
+    </div>
+
+    <div id="zoomPill" aria-live="polite"></div>
+    <div id="toasts"></div>
+  </main>
+
+  <aside class="panel" id="panel">
+    <header>
+      <h3 id="panelTitle">Panel</h3>
+      <button class="icon-btn" id="panelClose" title="Close"></button>
+    </header>
+    <div class="body" id="panelBody"></div>
+  </aside>
+
+  <div id="overlay"><div class="card" id="overlayCard"></div></div>
+</div>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>

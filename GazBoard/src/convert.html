@@ -1,0 +1,82 @@
+<meta charset="utf-8">
+<title>Converting…</title>
+<script src="app://board/vendor/jszip.min.js"></script>
+<script src="app://board/vendor/mammoth.browser.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font-family: Calibri, 'Segoe UI', system-ui, sans-serif; color: #111; }
+
+  /* --- Word --- */
+  .doc { padding: 20mm; font-size: 11pt; line-height: 1.42; }
+  .doc h1 { font-size: 20pt; margin: 0 0 .5em; }
+  .doc h2 { font-size: 16pt; margin: 1em 0 .4em; }
+  .doc h3 { font-size: 13pt; margin: 1em 0 .35em; }
+  .doc p { margin: 0 0 .6em; }
+  .doc table { border-collapse: collapse; width: 100%; margin: .8em 0; }
+  .doc td, .doc th { border: 1px solid #9aa0a6; padding: 4px 7px; vertical-align: top; }
+  .doc img { max-width: 100%; height: auto; }
+  .doc ul, .doc ol { margin: 0 0 .6em 1.3em; padding: 0; }
+  .doc blockquote { margin: .6em 0 .6em 1em; padding-left: .8em; border-left: 3px solid #ccc; color: #444; }
+
+  /* --- PowerPoint --- */
+  .slide { position: relative; overflow: hidden; page-break-after: always; break-after: page; }
+  .slide:last-child { page-break-after: auto; break-after: auto; }
+  .sh { position: absolute; box-sizing: border-box; font-size: 14pt; line-height: 1.2; overflow: hidden; }
+  .sh p { margin: 0 0 .28em; }
+</style>
+<div id="root"></div>
+<script type="module">
+  import { pptxToSlides } from './js/importers/pptx.js';
+
+  const q = new URLSearchParams(location.search);
+  const token = q.get('token');
+  const kind = q.get('kind');
+  const file = q.get('file');
+
+  const fail = (e) => window.board.convertError({ token, message: (e && e.message) || String(e) });
+
+  async function waitForAssets() {
+    if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch {} }
+    const imgs = [...document.images].filter((i) => !i.complete);
+    await Promise.all(imgs.map((i) => new Promise((res) => { i.onload = i.onerror = res; })));
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  }
+
+  try {
+    const buf = await window.board.readFile(file);
+
+    if (kind === 'word') {
+      const res = await window.mammoth.convertToHtml(
+        { arrayBuffer: buf },
+        {
+          convertImage: window.mammoth.images.imgElement((image) =>
+            image.read('base64').then((b64) => ({ src: `data:${image.contentType};base64,${b64}` }))
+          )
+        }
+      );
+      document.getElementById('root').innerHTML = `<div class="doc">${res.value || '<p><em>(empty document)</em></p>'}</div>`;
+      const st = document.createElement('style');
+      st.textContent = '@page { size: A4; margin: 0; }';
+      document.head.appendChild(st);
+      await waitForAssets();
+      window.board.convertReady({ token, widthMm: 210, heightMm: 297 });
+    } else {
+      const { widthPx, heightPx, slides } = await pptxToSlides(buf);
+      const root = document.getElementById('root');
+      root.innerHTML = slides.join('');
+      // A slide that is exactly page-height rounds up into a second sheet, so
+      // trim a hair and pin the paper size explicitly.
+      for (const el of root.querySelectorAll('.slide')) {
+        el.style.width = widthPx + 'px';
+        el.style.height = (heightPx - 1) + 'px';
+      }
+      const st = document.createElement('style');
+      st.textContent = `@page { size: ${widthPx / 96}in ${heightPx / 96}in; margin: 0; }`;
+      document.head.appendChild(st);
+      await waitForAssets();
+      window.board.convertReady({ token, widthMm: (widthPx / 96) * 25.4, heightMm: (heightPx / 96) * 25.4 });
+    }
+  } catch (e) {
+    fail(e);
+  }
+</script>

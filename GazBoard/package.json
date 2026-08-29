@@ -1,0 +1,114 @@
+{
+  "name": "gazboard",
+  "productName": "GazBoard",
+  "version": "1.16.1",
+  "description": "A free-form digital whiteboard - offline replica of the classic Microsoft Whiteboard 21.x experience, with Word / PowerPoint / PDF import.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "smoke": "xvfb-run -a electron . --smoke --no-sandbox",
+    "smoke:builtin": "GAZBOARD_DISABLE_LIBREOFFICE=1 xvfb-run -a electron . --smoke --no-sandbox",
+    "test:restart": "sh test/restart-test.sh",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "author": {
+    "name": "theBoringCode",
+    "email": "fahim9778@gmail.com"
+  },
+  "homepage": "https://github.com/fahim9778/GazBoard",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fahim9778/GazBoard"
+  },
+  "contributors": [
+    {
+      "name": "MD. Fakhruddin Gazzali",
+      "email": "fahim9778@gmail.com"
+    }
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.8.0",
+    "pdfjs-dist": "4.10.38"
+  },
+  "build": {
+    "appId": "com.theboringcode.gazboard",
+    "productName": "GazBoard",
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "package.json",
+      "!test/out/**"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "src/assets/icon.ico",
+      "publisherName": "theBoringCode",
+      "legalTrademarks": "theBoringCode"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity",
+      "icon": "src/assets/icon.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Office",
+      "icon": "src/assets/icon.png",
+      "synopsis": "Offline whiteboard with Word / PowerPoint / PDF import",
+      "description": "A free-form digital whiteboard for pen, sticky notes, shapes, text, images and documents. Runs entirely on your own computer - no account, no sign-in, no cloud.",
+      "maintainer": "theBoringCode <fahim9778@gmail.com>",
+      "desktop": {
+        "Name": "GazBoard",
+        "StartupWMClass": "gazboard"
+      }
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "GazBoard",
+      "uninstallDisplayName": "GazBoard ${version}",
+      "artifactName": "GazBoard-Setup-${version}.exe"
+    },
+    "portable": {
+      "artifactName": "GazBoard-${version}-portable.exe"
+    },
+    "fileAssociations": [
+      {
+        "ext": "gazboard",
+        "name": "GazBoard board",
+        "description": "GazBoard whiteboard",
+        "role": "Editor",
+        "icon": "src/assets/icon.ico"
+      },
+      {
+        "ext": "openboard",
+        "name": "GazBoard board (legacy)",
+        "description": "GazBoard whiteboard",
+        "role": "Editor",
+        "icon": "src/assets/icon.ico"
+      }
+    ],
+    "publish": null
+  }
+}

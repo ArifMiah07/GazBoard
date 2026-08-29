@@ -1,0 +1,228 @@
+// Right-hand slide-in panel: templates, background, settings, boards.
+
+import { h } from './popover.js';
+import { icon } from './icons.js';
+import { TEMPLATES, templateThumb } from '../templates.js';
+import { BOARD_COLORS, PATTERNS } from './palettes.js';
+
+export function createPanels(app) {
+  const panel = document.getElementById('panel');
+  const title = document.getElementById('panelTitle');
+  const body = document.getElementById('panelBody');
+  let currentKey = null;
+  let currentRender = null;
+
+  document.getElementById('panelClose').addEventListener('click', close);
+
+  function close() { panel.classList.remove('open'); currentKey = null; currentRender = null; }
+
+  function open(key, label, render) {
+    if (currentKey === key) { close(); return; }
+    currentKey = key;
+    currentRender = render;
+    title.textContent = label;
+    body.innerHTML = '';
+    body.appendChild(render());
+    panel.classList.add('open');
+  }
+
+  /** Redraw the open panel in place - used when a control changes its own state. */
+  function rerender() {
+    if (!currentRender) return;
+    body.innerHTML = '';
+    body.appendChild(currentRender());
+  }
+
+  /* ---------------- templates ---------------- */
+  const thumbCache = new Map();
+  function templates() {
+    open('templates', 'Templates', () => {
+      const groups = new Map();
+      for (const t of TEMPLATES) {
+        if (!groups.has(t.group)) groups.set(t.group, []);
+        groups.get(t.group).push(t);
+      }
+      const wrap = h('div', {});
+      wrap.appendChild(h('p', { style: 'margin:0 0 14px;color:var(--text-2);font-size:13px' },
+        'Templates are added to the board — your existing content is kept.'));
+      for (const [group, list] of groups) {
+        const sec = h('div', { class: 'section' }, h('h5', {}, group));
+        const grid = h('div', { class: 'tpl-grid' });
+        for (const t of list) {
+          if (!thumbCache.has(t.id)) thumbCache.set(t.id, templateThumb(t));
+          const btn = h('button', { class: 'tpl', title: t.name });
+          const img = h('img', { class: 'thumb', src: thumbCache.get(t.id), alt: '' });
+          btn.appendChild(img);
+          btn.appendChild(h('span', { class: 'name' }, t.name));
+          btn.addEventListener('click', () => { app.applyTemplate(t); close(); });
+          grid.appendChild(btn);
+        }
+        sec.appendChild(grid);
+        wrap.appendChild(sec);
+      }
+      return wrap;
+    });
+  }
+
+  /* ---------------- background ---------------- */
+  function background() {
+    open('background', 'Format background', () => {
+      const bg = app.store.doc.background;
+      const colors = h('div', { class: 'bg-grid' });
+      for (const c of BOARD_COLORS) {
+        const b = h('button', { class: 'bg-sw' + (bg.color === c ? ' active' : ''), title: c });
+        b.style.background = c;
+        b.addEventListener('click', () => { app.store.setBackground({ color: c, patternColor: c === '#2b2b2b' ? '#5a5a5a' : '#c8c6c4' }); rerender(); refresh(); });
+        colors.appendChild(b);
+      }
+
+      const pats = h('div', { class: 'pat-grid' });
+      for (const p of PATTERNS) {
+        const b = h('button', { class: 'pat' + (bg.pattern === p.id ? ' active' : ''), title: p.label });
+        b.appendChild(h('span', {}, p.label));
+        b.style.backgroundImage = patternPreview(p.id, bg.patternColor);
+        b.style.backgroundColor = bg.color;
+        b.addEventListener('click', () => { app.store.setBackground({ pattern: p.id }); rerender(); refresh(); });
+        pats.appendChild(b);
+      }
+
+      const custom = h('input', { type: 'color', value: bg.color });
+      custom.addEventListener('input', () => app.store.setBackground({ color: custom.value }));
+
+      return h('div', {},
+        h('div', { class: 'section' }, h('h5', {}, 'Colour'), colors),
+        h('div', { class: 'section' }, h('h5', {}, 'Custom colour'), custom),
+        h('div', { class: 'section' }, h('h5', {}, 'Pattern'), pats)
+      );
+    });
+  }
+
+  function patternPreview(id, color = '#c8c6c4') {
+    const c = encodeURIComponent(color);
+    switch (id) {
+      case 'grid': return `linear-gradient(${color} 1px, transparent 1px), linear-gradient(90deg, ${color} 1px, transparent 1px)`;
+      case 'lines': return `linear-gradient(${color} 1px, transparent 1px)`;
+      case 'columns': return `linear-gradient(90deg, ${color} 1px, transparent 1px)`;
+      case 'graph': return `linear-gradient(${color} 1px, transparent 1px), linear-gradient(90deg, ${color} 1px, transparent 1px)`;
+      case 'dots': return `radial-gradient(${color} 1.2px, transparent 1.2px)`;
+      default: return 'none';
+    }
+  }
+
+  /* ---------------- settings ---------------- */
+  function settings() {
+    open('settings', 'Settings', () => {
+      const s = app.settings;
+      const row = (label, control, hint) => h('div', { style: 'margin-bottom:16px' },
+        h('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:12px' },
+          h('span', { style: 'font-size:13.5px' }, label), control),
+        hint ? h('div', { style: 'font-size:12px;color:var(--text-2);margin-top:4px' }, hint) : null);
+
+      const mkChoice = (options, get, set) => {
+        const wrap = h('div', { style: 'display:flex;gap:4px' });
+        for (const [value, label] of options) {
+          const b = h('button', { class: 'btn' + (get() === value ? ' primary' : '') }, label);
+          b.style.cssText += 'padding:4px 10px;font-size:12.5px';
+          b.addEventListener('click', () => set(value));
+          wrap.appendChild(b);
+        }
+        return wrap;
+      };
+
+      const mkToggle = (get, set) => {
+        const i = h('input', { type: 'checkbox' });
+        i.checked = get();
+        i.addEventListener('change', () => { set(i.checked); app.saveSettings(); app.surface.invalidate(); });
+        return h('label', { class: 'toggle' }, i);
+      };
+
+      const info = h('div', { style: 'font-size:12px;color:var(--text-2);line-height:1.6' });
+      window.board.info().then((i) => {
+        info.innerHTML = `<b style="color:var(--text)">GazBoard ${i.version}</b> · by <b style="color:var(--accent)">theBoringCode</b><br>` +
+          `MD. Fakhruddin Gazzali · <a href="mailto:fahim9778@gmail.com" target="_blank" style="color:var(--accent)">fahim9778@gmail.com</a><br>` +
+          `Created with <span style="color:#e81123">&hearts;</span> with Claude Cowork<br>` +
+          `Electron ${i.electron} · Chromium ${i.chrome}<br>` +
+          `Office conversion: <b>${i.libreoffice ? 'LibreOffice detected' : 'built-in converter'}</b><br>` +
+          `Boards folder: <code style="font-size:11px">${i.userData}</code>`;
+      });
+
+      return h('div', {},
+        h('div', { class: 'section' },
+          h('h5', {}, 'Inking'),
+          row('Straighten shapes I draw', mkToggle(() => s.inkToShape, (v) => (s.inkToShape = v)),
+            'Off by default: ink is kept exactly as you drew it. Switch on and a hand-drawn circle, box or arrow snaps to a clean shape when you lift the pen — one undo returns your ink.'),
+          row('Pressure sensitivity', mkToggle(() => s.pressure, (v) => (s.pressure = v)), 'Vary ink width with pen pressure.'),
+          row('Draw with the mouse', mkChoice(
+            [['auto', 'Auto'], ['yes', 'Always'], ['no', 'Never']],
+            () => s.inkWithMouse,
+            (v) => { s.inkWithMouse = v; app.saveSettings(); rerender(); }
+          ), s.inkWithMouse === 'auto'
+            ? (s.penSeen
+              ? 'A stylus has been used on this board, so the mouse pans the canvas instead of inking.'
+              : 'No stylus seen yet, so the mouse draws. It switches to panning the first time you use a pen.')
+            : s.inkWithMouse === 'yes'
+              ? 'The mouse always inks, like a stylus.'
+              : 'The mouse only ever pans and selects; ink comes from the stylus.'),
+          row('Ruler snapping', mkToggle(() => app.ruler.snap, (v) => (app.ruler.snap = v)))
+        ),
+        h('div', { class: 'section' },
+          h('h5', {}, 'Canvas'),
+          row('Mouse wheel zooms', mkToggle(() => s.wheelZoom, (v) => (s.wheelZoom = v)), 'Off: wheel and trackpad pan, Ctrl+wheel zooms.'),
+          row('Auto-pan at the edges', mkToggle(() => s.edgePan, (v) => (s.edgePan = v)),
+            'While drawing or dragging, running the pointer into the edge of the window scrolls the canvas. A mouse button held down during a pen stroke drags the canvas too.'),
+          row('Return to select after drawing', mkToggle(() => s.returnToSelect, (v) => (s.returnToSelect = v))),
+          row('Autosave', mkToggle(() => s.autosave, (v) => (s.autosave = v)), 'Boards are stored locally on this computer.')
+        ),
+        h('div', { class: 'section' },
+          h('h5', {}, 'Board'),
+          h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px', onclick: () => { app.command('board.new'); close(); } }, 'New board'),
+          h('button', { class: 'btn danger', style: 'width:100%', onclick: () => app.command('edit.clear') }, 'Clear this canvas')
+        ),
+        h('div', { class: 'section' }, h('h5', {}, 'About'), info,
+          h('p', { style: 'font-size:12px;color:var(--text-2);margin-top:10px;line-height:1.6' },
+            'Everything stays on this device — there is no sign-in and no cloud sync. The document model is an operation log, so a sync layer can be added later without changing the editor.'))
+      );
+    });
+  }
+
+  /* ---------------- boards ---------------- */
+  async function boards() {
+    open('boards', 'My boards', () => h('div', { id: 'boardList' }, h('p', { style: 'color:var(--text-2)' }, 'Loading…')));
+    const list = await window.board.boards.list();
+    const host = document.getElementById('boardList');
+    if (!host) return;
+    host.innerHTML = '';
+    host.appendChild(h('button', { class: 'btn primary', style: 'width:100%;margin-bottom:14px', onclick: () => { app.command('board.new'); close(); } }, '+ New board'));
+    if (!list.length) host.appendChild(h('p', { style: 'color:var(--text-2);font-size:13px' }, 'No saved boards yet.'));
+
+    // Every board this app has ever saved is a plain file in one folder. Showing
+    // people where, and letting them open it, is worth more than any reassurance
+    // in a settings screen.
+    window.board.info().then((i) => {
+      if (!document.getElementById('boardList')) return;
+      const foot = h('div', { style: 'margin-top:16px;padding-top:12px;border-top:1px solid var(--stroke);font-size:12px;color:var(--text-2);line-height:1.6' },
+        h('div', {}, `${list.length} board${list.length === 1 ? '' : 's'}, saved on this computer at:`),
+        h('code', { style: 'font-size:11px;display:block;margin:4px 0 8px;word-break:break-all' }, i.userData + '/boards'),
+        h('button', { class: 'btn', style: 'width:100%', onclick: () => window.board.showItem(i.userData + '/boards') }, 'Open that folder'));
+      host.appendChild(foot);
+    });
+    for (const b of list) {
+      const row = h('button', { class: 'board-row' },
+        h('span', { html: icon('board', 20), style: 'color:var(--text-2);display:flex' }),
+        h('span', { class: 'meta' },
+          h('b', {}, b.name || 'Untitled board'),
+          h('small', {}, `${b.objects} item${b.objects === 1 ? '' : 's'} · ${new Date(b.modified).toLocaleString()}`)),
+        h('span', { class: 'icon-btn', title: 'Delete', html: icon('trash', 16), onclick: async (e) => { e.stopPropagation(); if (await app.confirm('Delete board?', `"${b.name}" will be permanently removed.`, 'Delete')) { await window.board.boards.remove(b.id); boards(); } } })
+      );
+      row.addEventListener('click', async () => {
+        const data = await window.board.boards.load(b.id);
+        if (data) { await app.loadBoard(data); close(); }
+      });
+      host.appendChild(row);
+    }
+  }
+
+  function refresh() { app.surface.invalidate(); }
+
+  return { templates, background, settings, boards, close, get open() { return !!currentKey; } };
+}

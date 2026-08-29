@@ -1,0 +1,48 @@
+// Fluent-flavoured line icons. `icon(name, size)` returns an SVG string.
+
+const P = {
+  undo: 'M7 8h7.5a4.5 4.5 0 0 1 0 9H10M7 8l3-3M7 8l3 3',
+  redo: 'M17 8H9.5a4.5 4.5 0 0 0 0 9H14M17 8l-3-3M17 8l-3 3',
+  select: 'M5 3l14 7-6 1.6L10.5 18z',
+  lasso: 'M12 4c4.4 0 8 2.4 8 5.4S16.4 15 12 15c-1.3 0-2.6-.2-3.7-.6M8.3 14.4C6.3 13.5 5 11.9 5 10 5 7 8.6 4.6 13 4.6M8 15c0 2-1 3-1 4a1.6 1.6 0 0 0 3 .4',
+  pen: 'M4 20l1.2-4L16 5.2a2 2 0 0 1 2.8 0l.8.8a2 2 0 0 1 0 2.8L8.6 19.4 4 20zM14.5 6.7l3.3 3.3',
+  highlighter: 'M6.5 19H4v-2.2l8.6-8.6 2.7 2.7L6.5 19zM13.6 6.9l2.2-2.2a1.7 1.7 0 0 1 2.4 0l1.6 1.6a1.7 1.7 0 0 1 0 2.4l-2.2 2.2M4 21.5h16',
+  eraser: 'M8.6 20H20M4.7 16.3l6-6a2 2 0 0 1 2.9 0l4.5 4.5a2 2 0 0 1 0 2.9L15.6 20H9.3l-4.6-4.6a1 1 0 0 1 0-1.4zM9.5 11.5l5.6 5.6',
+  note: 'M4.5 4.5h15v9.6L14.1 19.5H4.5zM19.5 14.1h-5.4v5.4M8 9h8M8 12h5.5',
+  text: 'M5 6.5V5h14v1.5M12 5v14M9 19h6',
+  shapes: 'M4 13h7v7H4zM15.5 4l5 8h-10z',
+  insert: 'M12 5v14M5 12h14',
+  image: 'M4 5h16v14H4zM4 15l4.5-4.5 3.5 3.5 3-3L20 16M9 9.2a1.2 1.2 0 1 1-2.4 0 1.2 1.2 0 0 1 2.4 0z',
+  doc: 'M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 15.5h6M9 9h3',
+  template: 'M4 5h16v5H4zM4 12h7v7H4zM13 12h7v7h-7z',
+  ruler: 'M3.5 14.5l11-11 6 6-11 11zM7 11l1.8 1.8M9.8 8.2l1.8 1.8M12.6 5.4l1.8 1.8',
+  more: 'M6 12h.01M12 12h.01M18 12h.01',
+  settings: 'M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4zM19.4 13.5l1.7 1.1-1.9 3.3-2-.7a7.6 7.6 0 0 1-1.8 1l-.3 2.1h-3.8l-.3-2.1a7.6 7.6 0 0 1-1.8-1l-2 .7-1.9-3.3 1.7-1.1a7.7 7.7 0 0 1 0-2.1L4.6 10.4l1.9-3.3 2 .7a7.6 7.6 0 0 1 1.8-1l.3-2.1h3.8l.3 2.1c.6.3 1.2.6 1.8 1l2-.7 1.9 3.3-1.7 1.1c.1.7.1 1.4 0 2.1z',
+  zoomIn: 'M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14zM16 16l4.5 4.5M8 11h6M11 8v6',
+  zoomOut: 'M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14zM16 16l4.5 4.5M8 11h6',
+  fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+  close: 'M6 6l12 12M18 6L6 18',
+  back: 'M15 5l-7 7 7 7',
+  chevronDown: 'M6 9l6 6 6-6',
+  chevronRight: 'M9 6l6 6-6 6',
+  trash: 'M4.5 7h15M9.5 7V5h5v2M6.5 7l1 13h9l1-13M10 10.5v6.5M14 10.5v6.5',
+  copy: 'M8 8h11v11H8zM5 16V5h11',
+  front: 'M4 8l8-4 8 4-8 4zM4 12l8 4 8-4M4 16l8 4 8-4',
+  lock: 'M6.5 10.5h11V20h-11zM9 10.5V8a3 3 0 0 1 6 0v2.5',
+  unlock: 'M6.5 10.5h11V20h-11zM9 10.5V8a3 3 0 0 1 5.8-1',
+  board: 'M3 5h18v11H3zM12 16v3M8.5 19h7',
+  grid: 'M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16',
+  palette: 'M12 3a9 9 0 0 0 0 18c1 0 1.6-.7 1.6-1.5 0-.4-.2-.8-.5-1-.3-.3-.4-.6-.4-1 0-.8.7-1.5 1.5-1.5H16a5 5 0 0 0 5-5c0-4.4-4-8-9-8zM7.5 12.5a1.2 1.2 0 1 0 0-2.4 1.2 1.2 0 0 0 0 2.4zM10 8.6a1.2 1.2 0 1 0 0-2.4 1.2 1.2 0 0 0 0 2.4zM14.4 8.6a1.2 1.2 0 1 0 0-2.4 1.2 1.2 0 0 0 0 2.4zM17.4 12a1.2 1.2 0 1 0 0-2.4 1.2 1.2 0 0 0 0 2.4z',
+  export: 'M12 15V4M12 4L8 8M12 4l4 4M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4',
+  check: 'M5 12.5l4.5 4.5L19 7.5',
+  help: 'M12 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16zM9.7 9.6a2.3 2.3 0 1 1 3 2.2c-.5.2-.8.7-.8 1.2v.6M12 16.6h.01',
+  duplicate: 'M9 3h9a3 3 0 0 1 3 3v9M6 7h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z',
+  table: 'M4 5h16v14H4zM4 10h16M4 15h16M9.5 5v14M14.5 5v14'
+};
+
+export function icon(name, size = 20, stroke = 1.6) {
+  const d = P[name] || P.more;
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="${stroke}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
+}
+
+export function hasIcon(name) { return !!P[name]; }

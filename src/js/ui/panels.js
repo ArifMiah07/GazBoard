@@ -3,6 +3,7 @@
 import { h } from './popover.js';
 import { icon } from './icons.js';
 import { TEMPLATES, templateThumb } from '../templates.js';
+import { PAPER, paperForPage } from './pdfdialog.js';
 import { BOARD_COLORS, PATTERNS } from './palettes.js';
 
 export function createPanels(app) {
@@ -44,7 +45,7 @@ export function createPanels(app) {
       }
       const wrap = h('div', {});
       wrap.appendChild(h('p', { style: 'margin:0 0 14px;color:var(--text-2);font-size:13px' },
-        'Templates are added to the board — your existing content is kept.'));
+        'Templates are added to the board — your existing content is kept. Canvas sizes only change the shape of the page.'));
       for (const [group, list] of groups) {
         const sec = h('div', { class: 'section' }, h('h5', {}, group));
         const grid = h('div', { class: 'tpl-grid' });
@@ -89,7 +90,54 @@ export function createPanels(app) {
       const custom = h('input', { type: 'color', value: bg.color });
       custom.addEventListener('input', () => app.store.setBackground({ color: custom.value }));
 
+      // Canvas size. Infinite is the default and always will be; a page is a
+      // sheet drawn at the origin that exports default to. Nothing is clipped.
+      const page = app.store.doc.page;
+      const current = page ? paperForPage(page) : null;
+      const orientation = current ? current.orientation : (app.settings.pageOrientation || 'portrait');
+
+      const sizeRow = h('div', { class: 'bg-sizes' });
+      const sizeBtn = (id, label, active) => {
+        const b = h('button', { class: 'btn' + (active ? ' primary' : '') }, label);
+        b.addEventListener('click', async () => { await app.setPageSize(id, orientation); refresh(); });
+        return b;
+      };
+      sizeRow.appendChild(sizeBtn('infinite', 'Infinite', !page));
+      for (const p of PAPER) {
+        if (!p.w || !p.h) continue;             // "fit board" is an export choice only
+        sizeRow.appendChild(sizeBtn(p.id, p.label, !!current && current.paper === p.id));
+      }
+
+      const orientRow = h('div', { class: 'bg-sizes' });
+      for (const o of [{ id: 'portrait', label: 'Portrait' }, { id: 'landscape', label: 'Landscape' }]) {
+        const b = h('button', { class: 'btn' + (orientation === o.id ? ' primary' : ''), disabled: !page }, o.label);
+        b.addEventListener('click', async () => {
+          const paper = current ? current.paper : (app.settings.pagePaper || 'a4');
+          await app.setPageSize(paper, o.id);
+          refresh();
+        });
+        orientRow.appendChild(b);
+      }
+
+      // when there is a page and work hangs off it, offer the one-click fix
+      const off = app.offPageObjects();
+      const fitRow = h('div', { class: 'bg-sizes' });
+      if (page && off.length) {
+        const b = h('button', { class: 'btn primary', style: 'width:100%' },
+          off.length === 1 ? 'Fit 1 item onto the page' : `Fit ${off.length} items onto the page`);
+        b.addEventListener('click', () => { app.fitContentToPage(); refresh(); });
+        fitRow.appendChild(b);
+        fitRow.appendChild(h('p', { style: 'margin:2px 0 0;font-size:12px;color:var(--text-2);line-height:1.6' },
+          'Exports cover the sheet, so anything outside it is left out.'));
+      }
+
+      const sizeNote = h('p', { style: 'margin:8px 0 0;font-size:12px;color:var(--text-2);line-height:1.6' },
+        page
+          ? 'Anything you draw outside the sheet stays where it is — it just sits off the page, and exports use the sheet.'
+          : 'The canvas has no edges. Pick a size to work on a fixed sheet instead.');
+
       return h('div', {},
+        h('div', { class: 'section' }, h('h5', {}, 'Canvas size'), sizeRow, orientRow, fitRow, sizeNote),
         h('div', { class: 'section' }, h('h5', {}, 'Colour'), colors),
         h('div', { class: 'section' }, h('h5', {}, 'Custom colour'), custom),
         h('div', { class: 'section' }, h('h5', {}, 'Pattern'), pats)

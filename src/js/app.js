@@ -1,6 +1,7 @@
 // GazBoard - application shell and command surface.
 
-import { Store, withAttached, worldBounds } from './core/store.js';
+import { Store, withAttached, worldBounds, boundsOf } from './core/store.js';
+import { scaleObject, translateObject } from './core/transform.js';
 import { Surface } from './core/surface.js';
 import { Interaction } from './core/tools.js';
 import { pick } from './core/hit.js';
@@ -184,8 +185,14 @@ class App {
     this.surface.selection.clear();
     if (data.camera) this.surface.cam.load(data.camera);
     else this.command('fit');
-    // opening a board always starts at 100%, keeping the place you were looking at
-    if (opts.startup) this.openAtActualSize();
+    // Opening a board starts at 100%, keeping the place you were looking at.
+    // A board on a fixed sheet is the exception: 100% of an A4 page is taller
+    // than most windows, so you would open looking at a corner of it. Fit the
+    // sheet instead, the way any document editor opens a page.
+    if (opts.startup) {
+      if (this.store.doc.page) requestAnimationFrame(() => this.fitToPage());
+      else this.openAtActualSize();
+    }
     document.getElementById('boardTitle').value = this.store.doc.name;
     this.syncUI();
     this.surface.invalidate();
@@ -389,6 +396,8 @@ class App {
   }
 
   applyTemplate(tpl) {
+    // a canvas-size template only sets the page; it adds nothing to the board
+    if (tpl.page) { this.setPageSize(tpl.page.paper, tpl.page.orientation); return; }
     const objs = tpl.build();
     if (!objs.length) { this.toast('Blank board'); return; }
     if (this.store.count) {
@@ -471,10 +480,12 @@ class App {
       case 'insert.document': pickAndInsertDocument(this); break;
       case 'insert.table': this.addTable(); break;
 
-      case 'export.png': exportPng(this, { scale: 2 }); break;
+      case 'export.png': this.checkOffPageBeforeExport().then((go) => go && exportPng(this, { scale: 2 })); break;
       case 'export.pngSelection': exportPng(this, { scale: 2, selectionOnly: true }); break;
-      case 'export.svg': exportSvg(this); break;
+      case 'export.svg': this.checkOffPageBeforeExport().then((go) => go && exportSvg(this)); break;
       case 'export.pdf': this.exportPdfWithSetup(); break;
+      case 'view.fitPage': this.fitToPage(); break;
+      case 'page.fitContent': this.fitContentToPage(); break;
       case 'board.save': saveBoardFile(this); break;
       case 'board.open': openBoardFile(this); break;
       case 'board.new':
@@ -581,12 +592,137 @@ class App {
     setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .25s'; setTimeout(() => el.remove(), 260); }, ms);
   }
 
+  /**
+   * Switch between the infinite canvas and a fixed sheet.
+   *
+   * Nothing is ever clipped: ink already outside the new page stays exactly
+   * where it is, it just sits off the paper. Switching back to infinite always
+   * gives everything back.
+   *
+   * @param {string} paperId  a PAPER id, or 'infinite'
+   */
+  async setPageSize(paperId, orientation = 'portrait') {
+    const { pageWorldSize, paperById } = await import('./ui/pdfdialog.js');
+    if (paperId === 'infinite' || !paperId) {
+      this.store.setPage(null);
+      this.toast('Infinite canvas');
+    } else {
+      const page = pageWorldSize(paperId, orientation);
+      if (!page) return;
+      this.store.setPage(page);
+      this.settings.pageOrientation = orientation;
+      this.settings.pagePaper = paperId;
+      this.saveSettings();
+      this.fitToPage();
+      this.toast(`${paperById(paperId).label} ${orientation}`);
+    }
+    this.surface.invalidate();
+    this.syncUI();
+  }
+
+  /** How much of the board is off the sheet. Empty list when it all fits. */
+  offPageObjects() {
+    const page = this.store.doc.page;
+    if (!page) return [];
+    const L = -page.w / 2, T = -page.h / 2, R = page.w / 2, B = page.h / 2;
+    return this.store.objects.filter((o) => {
+      const b = boundsOf(o);
+      return b.x < L - 0.5 || b.y < T - 0.5 || b.x + b.w > R + 0.5 || b.y + b.h > B + 0.5;
+    });
+  }
+
+  /**
+   * Shrink and centre everything so the whole board sits on the sheet.
+   *
+   * Aspect ratio is kept, so nothing is distorted, and it only ever scales
+   * down - blowing a small sketch up to fill A4 is not what anyone means by
+   * "fit". One undo puts it all back.
+   *
+   * @returns {boolean} false when there was nothing to do
+   */
+  fitContentToPage(margin = 24) {
+    const page = this.store.doc.page;
+    if (!page) { this.toast('This board has no page — it is an infinite canvas'); return false; }
+    const b = this.store.contentBounds();
+    if (!b || !b.w || !b.h) { this.toast('Nothing on the board yet'); return false; }
+
+    const availW = page.w - margin * 2, availH = page.h - margin * 2;
+    const scale = Math.min(availW / b.w, availH / b.h, 1);
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+
+    // one undoable commit for the whole board
+    this.store.updateMany(this.store.objects.map((o) => o.id), (o) => {
+      const copy = structuredClone(o);
+      scaleObject(copy, scale, scale, cx, cy);   // about the content's own centre
+      translateObject(copy, -cx, -cy);           // then centre that on the sheet
+      const patch = { x: copy.x, y: copy.y, w: copy.w, h: copy.h };
+      if (copy.type === 'stroke') { patch.points = copy.points; patch.bbox = copy.bbox; patch.width = copy.width; delete patch.x; delete patch.y; delete patch.w; delete patch.h; }
+      if (copy.fontSize !== undefined) patch.fontSize = copy.fontSize;
+      if (copy.lineWidth !== undefined) patch.lineWidth = copy.lineWidth;
+      if (copy.autoSize !== undefined) patch.autoSize = copy.autoSize;
+      return patch;
+    }, 'fit to page');
+    this.setSelection([]);
+    this.fitToPage();
+    this.toast(scale < 1 ? `Fitted to the page at ${Math.round(scale * 100)}%` : 'Centred on the page');
+    return true;
+  }
+
+  /** Sit the whole sheet in the window, with a little room around it. */
+  fitToPage() {
+    const page = this.store.doc.page;
+    if (!page) return;
+    const sf = this.surface;
+    const box = { x: -page.w / 2 - 40, y: -page.h / 2 - 40, w: page.w + 80, h: page.h + 80 };
+    if (sf.width && sf.height) sf.cam.fit(box, sf.width, sf.height);
+    this.syncZoom();
+    sf.invalidate();
+  }
+
   /** Ask for page setup, remember the answer, then export. */
+  /**
+   * Warn before an export silently crops.
+   *
+   * With a page set, exports cover the sheet - so anything off the sheet is
+   * dropped. Losing part of a board to a crop nobody mentioned is exactly the
+   * sort of thing people only notice after they have handed the PDF out.
+   *
+   * @returns {Promise<boolean>} false to abandon the export
+   */
+  async checkOffPageBeforeExport() {
+    const off = this.offPageObjects();
+    if (!off.length) return true;
+    const n = off.length;
+    const answer = await this.choose(
+      n === 1 ? 'One thing is off the page' : `${n} things are off the page`,
+      'Exports cover the sheet, so anything outside it will be left out. You can shrink the board to fit first, or export the sheet as it is.',
+      [{ id: 'fit', label: 'Fit everything on', primary: true },
+       { id: 'crop', label: 'Export the sheet anyway' }]
+    );
+    if (answer === null) return false;
+    if (answer === 'fit') this.fitContentToPage();
+    return true;
+  }
+
   async exportPdfWithSetup() {
     if (!this.store.objects.length) { this.toast('Nothing on the board to export'); return null; }
-    const { choosePageSetup } = await import('./ui/pdfdialog.js');
-    const b = this.store.contentBounds();
-    const box = { x: b.x - 40, y: b.y - 40, w: b.w + 80, h: b.h + 80 };
+    if (!(await this.checkOffPageBeforeExport())) return null;
+    const { choosePageSetup, paperForPage } = await import('./ui/pdfdialog.js');
+    const page = this.store.doc.page;
+    let box;
+    if (page && page.w && page.h) {
+      box = { x: -page.w / 2, y: -page.h / 2, w: page.w, h: page.h };
+      // the board already has a paper size - start the dialog on it
+      const match = paperForPage(page);
+      if (match) {
+        this.settings.pdfPaper = match.paper;
+        this.settings.pdfOrientation = match.orientation;
+        this.settings.pdfMode = 'fit';
+      }
+    } else {
+      const b = this.store.contentBounds();
+      box = { x: b.x - 40, y: b.y - 40, w: b.w + 80, h: b.h + 80 };
+    }
     const opts = await choosePageSetup(this, box);
     if (!opts) return null;
     Object.assign(this.settings, {
@@ -611,6 +747,31 @@ class App {
       update: (frac, msg) => { bar.firstChild.style.width = Math.round(clamp(frac, 0, 1) * 100) + '%'; if (msg) label.textContent = msg; },
       close: () => overlay.classList.remove('show')
     };
+  }
+
+  /**
+   * A confirm with more than two ways out.
+   * @param {{id:string,label:string,primary?:boolean}[]} choices
+   * @returns {Promise<string|null>} the chosen id, or null if cancelled
+   */
+  choose(title, text, choices) {
+    return new Promise((resolve) => {
+      const overlay = document.getElementById('overlay');
+      const card = document.getElementById('overlayCard');
+      card.innerHTML = '';
+      const done = (v) => { overlay.classList.remove('show'); document.removeEventListener('keydown', onKey, true); resolve(v); };
+      const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); } };
+      document.addEventListener('keydown', onKey, true);
+      card.appendChild(h('h3', {}, title));
+      card.appendChild(h('p', {}, text));
+      const row = h('div', { class: 'actions', style: 'flex-wrap:wrap;gap:8px' },
+        h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'));
+      for (const c of choices) {
+        row.appendChild(h('button', { class: 'btn' + (c.primary ? ' primary' : ''), onclick: () => done(c.id) }, c.label));
+      }
+      card.appendChild(row);
+      overlay.classList.add('show');
+    });
   }
 
   confirm(title, text, confirmLabel = 'OK') {

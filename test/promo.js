@@ -141,7 +141,7 @@ async function run(win, app) {
   await js(`
     const a = window.app;
     P.reset('dots', 'Greedy algorithms · lecture 9');
-    const { insertDocument } = await import('app://src/js/insert.js');
+    const { insertDocument } = await import('app://board/js/insert.js');
     await insertDocument(a, ${JSON.stringify(path.join(__dirname, 'fixtures', 'lecture-09-greedy.pptx'))},
       { pages: [1], layout: 'row' });
   `);

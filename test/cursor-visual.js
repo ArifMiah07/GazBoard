@@ -6,7 +6,7 @@ async function run(win, app){
   const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
   await sleep(900);
   await js(`
-    const { inkCursor } = await import('app://src/js/core/cursors.js');
+    const { inkCursor } = await import('app://board/js/core/cursors.js');
     const decode = (c) => decodeURIComponent(c.slice(c.indexOf(',')+1, c.lastIndexOf('")'))).replace(/'/g,'"');
     const box = document.createElement('div');
     box.style.cssText='position:fixed;inset:0;background:#fff;z-index:9999;display:flex;align-items:center;gap:40px;padding:60px;font:14px system-ui';

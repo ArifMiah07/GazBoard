@@ -147,7 +147,20 @@ export async function insertDocument(app, filePath, opts = {}) {
 
 /** Place rendered pages on the board without overlapping what is already there. */
 function layoutPages(app, rendered, { name, layout, multiPage }) {
-  const worldScale = 1.6;                       // 72dpi points -> comfortable board units
+  let worldScale = 1.6;                         // 72dpi points -> comfortable board units
+
+  // On a fixed sheet, an imported page has to land ON the sheet. A slide is
+  // about 1536 units wide at the default scale and A4 is 794, so without this
+  // the import would hang off both edges and quietly get cropped on export.
+  const page = app.store.doc.page;
+  if (page && page.w && page.h) {
+    const margin = 24;
+    const widest = Math.max(...rendered.map((p) => p.width));
+    const tallest = Math.max(...rendered.map((p) => p.height));
+    const fit = Math.min((page.w - margin * 2) / widest, (page.h - margin * 2) / tallest);
+    worldScale = Math.min(worldScale, fit);
+  }
+
   const gap = 48;
   const cellW = Math.max(...rendered.map((p) => p.width)) * worldScale;
   const cellH = Math.max(...rendered.map((p) => p.height)) * worldScale;
@@ -160,7 +173,11 @@ function layoutPages(app, rendered, { name, layout, multiPage }) {
   const rows = layout === 'stack' ? 1 : Math.ceil(rendered.length / perRow);
   const spanW = layout === 'stack' ? cellW + step * (rendered.length - 1) : cols * (cellW + gap) - gap;
   const spanH = layout === 'stack' ? cellH + step * (rendered.length - 1) : rows * (cellH + gap) - gap;
-  const origin = dropOrigin(app, spanW, spanH);
+  // a single page onto an empty sheet goes in the middle of the sheet
+  const onlyPage = page && page.w && rendered.length === 1 && !app.store.objects.length;
+  const origin = onlyPage
+    ? { x: -spanW / 2, y: -spanH / 2 }
+    : dropOrigin(app, spanW, spanH);
 
   return rendered.map((p, i) => {
     let x, y;

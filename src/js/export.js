@@ -6,6 +6,11 @@ import { layoutPages } from './ui/pdfdialog.js';
 import { FONT, faceOf } from './core/render.js';
 
 function exportBounds(app, pad = 60) {
+  // On a fixed sheet the sheet IS the export: that is the whole point of
+  // choosing one. Anything drawn off the paper is left out, the same as it
+  // would be on a printer.
+  const page = app.store.doc.page;
+  if (page && page.w && page.h) return { x: -page.w / 2, y: -page.h / 2, w: page.w, h: page.h };
   const b = app.store.contentBounds();
   if (!b) {
     const v = app.surface.cam.viewport(app.surface.width, app.surface.height);
@@ -13,6 +18,9 @@ function exportBounds(app, pad = 60) {
   }
   return { x: b.x - pad, y: b.y - pad, w: b.w + pad * 2, h: b.h + pad * 2 };
 }
+
+/** Exposed so the suite can check what an export would cover. */
+export const exportBoundsForTest = (app) => exportBounds(app);
 
 export async function exportPng(app, { scale = 2, transparent = false, selectionOnly = false } = {}) {
   let box;

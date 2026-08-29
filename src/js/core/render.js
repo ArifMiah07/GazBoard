@@ -37,13 +37,49 @@ export function getImage(src, onload) {
  * would paint CSS-pixel coordinates into a device-pixel buffer and leave the
  * right and bottom of the canvas unpainted on any HiDPI display.
  */
-export function drawBackground(ctx, bg, cam, w, h) {
+/**
+ * The sheet, when the board has a fixed page size.
+ *
+ * Drawn in screen space, like the background it sits on: a white rectangle with
+ * a soft shadow over a dimmed surround, so the edge of the page is obvious
+ * without anything being clipped. Anything drawn outside still shows - it just
+ * sits off the paper, which is exactly what it will look like when printed.
+ *
+ * @returns {{x:number,y:number,w:number,h:number}|null} the sheet in screen px
+ */
+export function pageRect(page, cam) {
+  if (!page || !page.w || !page.h) return null;
+  const x = -page.w / 2 * cam.z + cam.x;
+  const y = -page.h / 2 * cam.z + cam.y;
+  return { x, y, w: page.w * cam.z, h: page.h * cam.z };
+}
+
+export function drawBackground(ctx, bg, cam, w, h, page = null) {
   ctx.save();
-  ctx.fillStyle = bg.color || '#ffffff';
-  ctx.fillRect(0, 0, w, h);
+
+  const sheet = pageRect(page, cam);
+  if (sheet) {
+    // the world beyond the paper
+    ctx.fillStyle = shadeOf(bg.color || '#ffffff');
+    ctx.fillRect(0, 0, w, h);
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,.20)';
+    ctx.shadowBlur = Math.min(26, 10 + cam.z * 8);
+    ctx.shadowOffsetY = 2;
+    ctx.fillStyle = bg.color || '#ffffff';
+    ctx.fillRect(sheet.x, sheet.y, sheet.w, sheet.h);
+    ctx.restore();
+    // the pattern belongs to the paper, so keep it on the paper
+    ctx.beginPath();
+    ctx.rect(sheet.x, sheet.y, sheet.w, sheet.h);
+    ctx.clip();
+  } else {
+    ctx.fillStyle = bg.color || '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+  }
 
   const pattern = bg.pattern || 'none';
-  if (pattern === 'none') { ctx.restore(); return; }
+  if (pattern === 'none') { ctx.restore(); if (sheet) strokePageEdge(ctx, sheet); return; }
 
   const base = 40;                        // world spacing
   let step = base * cam.z;
@@ -81,6 +117,7 @@ export function drawBackground(ctx, bg, cam, w, h) {
     ctx.stroke();
   }
   ctx.restore();
+  if (sheet) strokePageEdge(ctx, sheet);
 }
 
 /* =================================================================== *
@@ -433,6 +470,24 @@ export function handlePositions(box) {
     s: { x: x + w / 2, y: y + h }, sw: { x, y: y + h }, w: { x, y: y + h / 2 },
     rot: { x: x + w / 2, y: y - 28 }
   };
+}
+
+/** A hairline around the sheet so the boundary reads even on a white board. */
+function strokePageEdge(ctx, sheet) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(32,31,30,.22)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(Math.round(sheet.x) + 0.5, Math.round(sheet.y) + 0.5, Math.round(sheet.w), Math.round(sheet.h));
+  ctx.restore();
+}
+
+/** A touch darker than the paper, for the surround. */
+function shadeOf(hex) {
+  const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(String(hex).trim());
+  if (!m) return '#e8e6e3';
+  const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16));
+  const mix = (c) => Math.round(c * 0.90);
+  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
 }
 
 /** Screen space, CSS pixels - see the note on drawBackground. */

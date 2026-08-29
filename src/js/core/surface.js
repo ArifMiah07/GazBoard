@@ -123,7 +123,7 @@ export class Surface {
     if (!w || !h) return;
 
     this.screenTransform();
-    drawBackground(ctx, this.store.doc.background, cam, w, h);
+    drawBackground(ctx, this.store.doc.background, cam, w, h, this.store.doc.page);
 
     ctx.setTransform(this.dpr * cam.z, 0, 0, this.dpr * cam.z, this.dpr * cam.x, this.dpr * cam.y);
 

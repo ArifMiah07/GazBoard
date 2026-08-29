@@ -48,7 +48,21 @@ function quadrants(labels, colors, { x = -620, y = -380, w = 620, h = 380, gap =
 
 const PALETTE = ['#6264a7', '#0078d4', '#038387', '#498205', '#ca5010', '#8764b8'];
 
+// Page sizes come first, because the commenter who asked for them was right:
+// you want to choose the shape of the paper before you start writing on it,
+// not after. `page` is handled by the app rather than build() - these add no
+// objects, they just set the canvas size.
+const PAGE = (id, paper, orientation, name) => ({
+  id, name, group: 'Canvas size', page: { paper, orientation }, build: () => []
+});
+
 export const TEMPLATES = [
+  PAGE('page-infinite', 'infinite', 'portrait', 'Infinite canvas'),
+  PAGE('page-a4-l', 'a4', 'landscape', 'A4 landscape'),
+  PAGE('page-a4-p', 'a4', 'portrait', 'A4 portrait'),
+  PAGE('page-letter-l', 'letter', 'landscape', 'Letter landscape'),
+  PAGE('page-letter-p', 'letter', 'portrait', 'Letter portrait'),
+  PAGE('page-a3-l', 'a3', 'landscape', 'A3 landscape'),
   {
     id: 'blank', name: 'Blank board', group: 'General',
     build: () => []
@@ -195,6 +209,37 @@ export function templateThumb(tpl, w = 150, h = 88) {
   const ctx = c.getContext('2d');
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, c.width, c.height);
+  // a page template draws the sheet it would give you, not an empty frame
+  if (tpl.page) {
+    ctx.fillStyle = '#f3f2f1';
+    ctx.fillRect(0, 0, c.width, c.height);
+    if (tpl.page.paper === 'infinite') {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.strokeStyle = '#d2d0ce'; ctx.lineWidth = 3;
+      ctx.beginPath();
+      for (let i = 1; i < 4; i++) {
+        ctx.moveTo((c.width / 4) * i, 0); ctx.lineTo((c.width / 4) * i, c.height);
+        ctx.moveTo(0, (c.height / 4) * i); ctx.lineTo(c.width, (c.height / 4) * i);
+      }
+      ctx.stroke();
+    } else {
+      const ratios = { a4: 210 / 297, letter: 215.9 / 279.4, a3: 297 / 420 };
+      let r = ratios[tpl.page.paper] || 210 / 297;
+      if (tpl.page.orientation === 'landscape') r = 1 / r;
+      const m = 16;
+      let pw = c.width - m * 2, ph = pw / r;
+      if (ph > c.height - m * 2) { ph = c.height - m * 2; pw = ph * r; }
+      const px = (c.width - pw) / 2, py = (c.height - ph) / 2;
+      ctx.fillStyle = 'rgba(0,0,0,.13)';
+      ctx.fillRect(px + 3, py + 4, pw, ph);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(px, py, pw, ph);
+      ctx.strokeStyle = '#c8c6c4'; ctx.lineWidth = 2;
+      ctx.strokeRect(px, py, pw, ph);
+    }
+    return c.toDataURL();
+  }
   if (!objs.length) {
     ctx.strokeStyle = '#e1dfdd'; ctx.lineWidth = 4;
     ctx.strokeRect(10, 10, c.width - 20, c.height - 20);

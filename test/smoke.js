@@ -649,7 +649,7 @@ async function run(win, app) {
   /* ---- text comes out handwritten without anyone choosing it ---- */
   const faces = await js(`
     const a = window.app;
-    const { faceOf } = await import('app://src/js/core/render.js');
+    const { faceOf } = await import('app://board/js/core/render.js');
     const KEY = 'gazboard.settings', OLD = 'openboard.settings';
     const keep = localStorage.getItem(KEY);
     const withStored = (v) => {
@@ -1895,6 +1895,192 @@ async function run(win, app) {
   await fs.rm(path.join(boardsDir, 'legacy-1.json'), { force: true });
   await fs.rm(path.join(path.dirname(userData), 'OpenBoard'), { recursive: true, force: true });
 
+  /* ---- infinite canvas vs a fixed sheet ---- */
+  const canvas = await js(`
+    const a = window.app;
+    const { pageWorldSize, paperForPage } = await import('app://board/js/ui/pdfdialog.js');
+    const { pageRect } = await import('app://board/js/core/render.js');
+    const r = {};
+    a.newBoard(true);
+    r.defaultIsInfinite = a.store.doc.page === null;
+
+    await a.setPageSize('a4', 'landscape');
+    r.a4 = a.store.doc.page && { ...a.store.doc.page };
+    r.expected = pageWorldSize('a4', 'landscape');
+    r.roundTrip = paperForPage(a.store.doc.page);
+
+    // ink outside the sheet must survive - a page is a guide, not a crop
+    a.store.add({ id: 'faroff', type: 'shape', kind: 'rect', x: 5000, y: 5000, w: 100, h: 100,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 });
+    r.objectsWithPage = a.store.objects.length;
+    await a.setPageSize('infinite');
+    r.backToInfinite = a.store.doc.page === null;
+    r.objectsAfter = a.store.objects.length;
+    r.farStillThere = !!a.store.get('faroff');
+
+    // and it survives a save/load round trip
+    await a.setPageSize('letter', 'portrait');
+    const saved = a.store.toJSON();
+    r.savedPage = saved.page && { ...saved.page };
+    a.newBoard(true);
+    await a.loadBoard(saved, { silent: true });
+    r.loadedPage = a.store.doc.page && { ...a.store.doc.page };
+
+    // the sheet is drawn centred on the origin
+    const rect = pageRect({ w: 800, h: 600 }, { x: 0, y: 0, z: 1 });
+    r.sheetAtOrigin = rect;
+    r.sheetZoomed = pageRect({ w: 800, h: 600 }, { x: 0, y: 0, z: 0.5 });
+
+    // undo steps back to whatever the canvas was before, infinite included
+    await a.setPageSize('infinite');
+    await a.setPageSize('a3', 'landscape');
+    const beforeUndo = a.store.doc.page && a.store.doc.page.w;
+    a.command('edit.undo');
+    r.undoWent = { before: beforeUndo, after: a.store.doc.page };
+
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+
+  check('a new board is an infinite canvas', canvas.defaultIsInfinite === true);
+  check('choosing A4 landscape sets a sheet of the right size',
+    canvas.a4 && canvas.a4.w === canvas.expected.w && canvas.a4.h === canvas.expected.h,
+    JSON.stringify(canvas.a4));
+  check('the sheet is recognised as the paper it came from',
+    canvas.roundTrip && canvas.roundTrip.paper === 'a4' && canvas.roundTrip.orientation === 'landscape',
+    JSON.stringify(canvas.roundTrip));
+  check('work outside the sheet is never destroyed',
+    canvas.objectsAfter === canvas.objectsWithPage && canvas.farStillThere,
+    `${canvas.objectsWithPage} -> ${canvas.objectsAfter}`);
+  check('switching back to infinite is one click', canvas.backToInfinite === true);
+  check('the page size is saved with the board and comes back',
+    canvas.loadedPage && canvas.savedPage && canvas.loadedPage.w === canvas.savedPage.w
+      && canvas.loadedPage.h === canvas.savedPage.h,
+    JSON.stringify([canvas.savedPage, canvas.loadedPage]));
+  check('the sheet is centred on the origin',
+    canvas.sheetAtOrigin.x === -400 && canvas.sheetAtOrigin.y === -300
+      && canvas.sheetAtOrigin.w === 800 && canvas.sheetAtOrigin.h === 600,
+    JSON.stringify(canvas.sheetAtOrigin));
+  check('the sheet scales with the zoom',
+    canvas.sheetZoomed.w === 400 && canvas.sheetZoomed.h === 300, JSON.stringify(canvas.sheetZoomed));
+  check('changing the canvas size can be undone',
+    canvas.undoWent.before > 0 && canvas.undoWent.after === null, JSON.stringify(canvas.undoWent));
+
+  const pageOpen = await js(`
+    const a = window.app;
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    const saved = a.store.toJSON();
+    saved.camera = { x: 0, y: 0, z: 1 };          // a camera that shows a corner
+    a.newBoard(true);
+    await a.loadBoard(saved, { silent: true, startup: true });
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const sf = a.surface, page = a.store.doc.page;
+    // the whole sheet has to be inside the window
+    const view = sf.cam.viewport(sf.width, sf.height);
+    return {
+      z: sf.cam.z,
+      fits: view.w >= page.w && view.h >= page.h,
+      pageH: page.h, viewH: Math.round(view.h)
+    };
+  `);
+  check('a board on a sheet opens showing the whole sheet, not a corner of it',
+    pageOpen.fits && pageOpen.z < 1, JSON.stringify(pageOpen));
+
+  const pageTpl = await js(`
+    const { TEMPLATES } = await import('app://board/js/templates.js');
+    const a = window.app;
+    a.newBoard(true);
+    const tpl = TEMPLATES.find(t => t.id === 'page-a4-p');
+    a.applyTemplate(tpl);
+    await new Promise(r => setTimeout(r, 60));
+    return {
+      group: tpl.group,
+      count: TEMPLATES.filter(t => t.page).length,
+      page: a.store.doc.page && { ...a.store.doc.page },
+      objectsAdded: a.store.objects.length
+    };
+  `);
+  check('page sizes are offered in Templates, before you start inking',
+    pageTpl.count >= 5 && pageTpl.group === 'Canvas size', `${pageTpl.count} in "${pageTpl.group}"`);
+  check('picking one sets the page and adds nothing to the board',
+    pageTpl.page && pageTpl.page.h > pageTpl.page.w && pageTpl.objectsAdded === 0,
+    JSON.stringify(pageTpl));
+
+  const pageExport = await js(`
+    const a = window.app;
+    a.newBoard(true);
+    a.store.add({ id: 'tiny', type: 'shape', kind: 'rect', x: -20, y: -20, w: 40, h: 40,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 });
+    await a.setPageSize('a4', 'portrait');
+    const { exportBoundsForTest } = await import('app://board/js/export.js');
+    return exportBoundsForTest(a);
+  `);
+  check('exports use the sheet, not just what you happened to draw',
+    Math.abs(pageExport.w - 794) < 2 && Math.abs(pageExport.h - 1123) < 2,
+    JSON.stringify(pageExport));
+
+  await js(`window.app.newBoard(true); window.app.store.clear();`);
+
+  /* ---- nothing falls off the sheet without you knowing ---- *
+   * A slide imports at about 1536 units wide; A4 is 794. Before this was
+   * handled, importing onto a sheet put half the page over the edge and the
+   * export cropped it silently.
+   */
+  const offpage = await js(`
+    const a = window.app;
+    const { insertDocument } = await import('app://board/js/insert.js');
+    const r = {};
+
+    a.newBoard(true);
+    await a.setPageSize('a4', 'portrait');
+    await insertDocument(a, ${JSON.stringify(path.join(FIX, 'lecture-09-greedy.pptx'))}, { pages: [1], layout: 'row' });
+    const page = a.store.doc.page;
+    const img = a.store.objects.find(o => o.type === 'image');
+    r.imported = img && { w: Math.round(img.w), h: Math.round(img.h), x: Math.round(img.x), y: Math.round(img.y) };
+    r.page = { w: page.w, h: page.h };
+    r.fitsOnSheet = a.offPageObjects().length === 0;
+
+    // something dragged well off the sheet is detected
+    a.store.add({ id: 'stray', type: 'shape', kind: 'rect', x: 4000, y: 4000, w: 100, h: 100,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 });
+    r.strayDetected = a.offPageObjects().length;
+
+    // and the one-click fix brings it back inside, without distorting anything
+    const beforeAspect = (() => { const o = a.store.get(img.id); return o.w / o.h; })();
+    a.fitContentToPage();
+    const after = a.store.get(img.id);
+    r.afterFit = { off: a.offPageObjects().length, aspect: after.w / after.h, beforeAspect };
+    r.strayStillExists = !!a.store.get('stray');
+
+    // and it is one undo
+    a.command('edit.undo');
+    r.afterUndo = a.offPageObjects().length;
+
+    // an infinite board never reports anything off-page
+    await a.setPageSize('infinite');
+    r.infiniteOff = a.offPageObjects().length;
+
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+
+  check('an imported page is scaled to land on the sheet',
+    offpage.imported && offpage.imported.w <= offpage.page.w && offpage.imported.h <= offpage.page.h,
+    JSON.stringify(offpage.imported) + ' vs ' + JSON.stringify(offpage.page));
+  check('and it lands on the sheet, not hanging off the edge', offpage.fitsOnSheet === true);
+  check('work dragged off the sheet is detected', offpage.strayDetected === 1,
+    String(offpage.strayDetected));
+  check('fitting everything on brings it all back inside',
+    offpage.afterFit.off === 0, String(offpage.afterFit.off));
+  check('fitting keeps the aspect ratio, so pages are not squashed',
+    Math.abs(offpage.afterFit.aspect - offpage.afterFit.beforeAspect) < 0.01,
+    `${offpage.afterFit.beforeAspect} -> ${offpage.afterFit.aspect}`);
+  check('fitting moves things, it never deletes them', offpage.strayStillExists === true);
+  check('fitting the board to the page is a single undo', offpage.afterUndo === 1,
+    String(offpage.afterUndo));
+  check('an infinite canvas has no off-page concept', offpage.infiniteOff === 0);
+
   /* ---- PDF export with page sizes ---- */
   const pdfDir = path.join(OUT, 'pdf');
   await fs.mkdir(pdfDir, { recursive: true });
@@ -1905,8 +2091,8 @@ async function run(win, app) {
   };
   const pdfL = await js(`
     const a = window.app;
-    const { layoutPages } = await import('app://src/js/ui/pdfdialog.js');
-    const { exportPdf } = await import('app://src/js/export.js');
+    const { layoutPages } = await import('app://board/js/ui/pdfdialog.js');
+    const { exportPdf } = await import('app://board/js/export.js');
     const r = {};
     r.a4 = layoutPages({x:0,y:0,w:1200,h:700}, {paper:'a4', orientation:'landscape', margin:'narrow', mode:'fit'});
     r.tile = layoutPages({x:0,y:0,w:2400,h:3000}, {paper:'a4', orientation:'portrait', margin:'narrow', mode:'tile', scale:1});

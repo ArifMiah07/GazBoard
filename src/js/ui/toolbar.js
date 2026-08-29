@@ -342,6 +342,7 @@ export function openExportPopover(app, anchor) {
     menuItem('Export selection as PNG…', 'image', () => app.command('export.pngSelection'), { disabled: !app.surface.selection.size }),
     menuItem('Export as PDF…', 'doc', () => app.command('export.pdf')),
     menuItem('Export as SVG…', 'export', () => app.command('export.svg')),
+    menuItem('Fit everything onto the page', 'shapes', () => app.command('page.fitContent'), { disabled: !app.store.doc.page }),
     h('div', { class: 'menu-sep' }),
     menuItem('Save a copy (.gazboard)…', 'doc', () => app.command('board.save'), { key: 'Ctrl+S' }),
     menuItem('Open a board file…', 'board', () => app.command('board.open'), { key: 'Ctrl+O' })

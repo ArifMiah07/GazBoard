@@ -102,6 +102,11 @@ input, textarea { font: inherit; }
 
 .sep { width: 1px; height: 26px; background: var(--stroke); margin: 0 5px 10px; flex: 0 0 auto; }
 
+/* canvas-size chooser in the background panel */
+.bg-sizes{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+.bg-sizes .btn{ padding:6px 12px; font-size:13px; }
+.bg-sizes .btn[disabled]{ opacity:.4; pointer-events:none; }
+
 /* ---------------- popovers ---------------- */
 .pop {
   position: absolute; z-index: 40; background: var(--surface); border: 1px solid var(--stroke);

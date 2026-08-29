@@ -16,6 +16,7 @@ export function emptyDoc(name = 'Untitled board') {
     id: uid('b'), name, schema: 1,
     created: Date.now(), modified: Date.now(),
     background: { color: '#ffffff', pattern: 'none', patternColor: '#c8c6c4' },
+    page: null,                    // null = infinite canvas; {w,h} = a fixed sheet
     camera: { x: 0, y: 0, z: 1 },
     objects: {},   // id -> object
     order: []      // z-order, back to front
@@ -195,6 +196,18 @@ export class Store {
     this.commit(label, ops);
   }
 
+  /**
+   * The board is infinite by default. Setting a page draws a sheet of that size
+   * at the origin and makes exports default to it. Ink is never clipped - you
+   * can still draw outside, it just sits visibly off the page.
+   *
+   * @param {{w:number,h:number}|null} page  world units, or null for infinite
+   */
+  setPage(page) {
+    const before = this.doc.page ? { ...this.doc.page } : null;
+    this.commit('page size', [{ t: 'doc', before: { page: before }, after: { page: page ? { ...page } : null } }]);
+  }
+
   setBackground(patch) {
     const before = { ...this.doc.background };
     this.commit('background', [{ t: 'doc', before: { background: before }, after: { background: { ...before, ...patch } } }]);
@@ -262,7 +275,7 @@ export class Store {
   toJSON(extra) {
     const d = this.doc;
     return { id: d.id, name: d.name, schema: 1, created: d.created, modified: d.modified,
-      background: d.background, camera: d.camera,
+      background: d.background, page: d.page || null, camera: d.camera,
       objects: d.order.map((id) => d.objects[id]).filter(Boolean), ...extra };
   }
 
@@ -280,6 +293,7 @@ export class Store {
     d.created = data.created || Date.now();
     d.modified = data.modified || Date.now();
     d.background = { ...d.background, ...(data.background || {}) };
+    d.page = data.page || null;
     d.camera = data.camera || d.camera;
     const list = Array.isArray(data.objects) ? data.objects
       : Array.isArray(data.objectList) ? data.objectList

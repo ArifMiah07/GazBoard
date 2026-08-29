@@ -20,6 +20,35 @@ export const MARGINS = [
 ];
 
 export const paperById = (id) => PAPER.find((p) => p.id === id) || PAPER[0];
+
+/** Millimetres to world units. A world unit is a CSS pixel: 96 to the inch. */
+export const PX_PER_MM = 96 / 25.4;
+
+/**
+ * The size of a sheet of paper in world units, ready to hand to store.setPage.
+ * @param {string} id  a PAPER id
+ * @param {'portrait'|'landscape'} orientation
+ */
+export function pageWorldSize(id, orientation = 'portrait') {
+  const p = paperById(id);
+  if (!p.w || !p.h) return null;                 // "fit" is an export option, not a page
+  const w = Math.round(p.w * PX_PER_MM);
+  const h = Math.round(p.h * PX_PER_MM);
+  return orientation === 'landscape' ? { w: h, h: w } : { w, h };
+}
+
+/** The paper a board's page matches, so the export dialog can preselect it. */
+export function paperForPage(page) {
+  if (!page) return null;
+  for (const p of PAPER) {
+    if (!p.w || !p.h) continue;
+    for (const [w, h, orientation] of [[p.w, p.h, 'portrait'], [p.h, p.w, 'landscape']]) {
+      if (Math.abs(page.w - w * PX_PER_MM) < 2 && Math.abs(page.h - h * PX_PER_MM) < 2)
+        return { paper: p.id, orientation };
+    }
+  }
+  return null;
+}
 export const marginById = (id) => MARGINS.find((m) => m.id === id) || MARGINS[1];
 
 /**

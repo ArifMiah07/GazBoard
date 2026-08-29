@@ -28,6 +28,18 @@ const bytesToDataUrl = (buf, mime) => new Promise((res) => {
 
 const mimeFor = (ext) => ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml' }[ext] || 'image/png');
 
+/** Sniff the real file type from its magic bytes so a renamed executable can't pass as an image. */
+function looksLikeImage(buf, ext) {
+  const b = new Uint8Array(buf);
+  if (ext === 'png') return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47;
+  if (ext === 'jpg' || ext === 'jpeg') return b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF;
+  if (ext === 'gif') return b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46;
+  if (ext === 'bmp') return b[0] === 0x42 && b[1] === 0x4D;
+  if (ext === 'webp') return b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46;
+  if (ext === 'svg') return /^\s*(<\?xml|<svg)/i.test(new TextDecoder().decode(b.slice(0, 256)));
+  return false;
+}
+
 function measure(dataUrl) {
   return new Promise((res, rej) => {
     const img = new Image();

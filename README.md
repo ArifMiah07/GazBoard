@@ -283,6 +283,8 @@ Screenshots and a results file are written to `test/out/`.
 
 ![The MS Whiteboard–style pen tray toolbar](Screenshots/gazboardtoolbar.png)
 
+![Multi Size Page Support](Screenshots/gazboardmultisizecanvas.png)
+
 ---
 ## Not included
 

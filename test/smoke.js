@@ -595,25 +595,42 @@ async function run(win, app) {
 
     // Where the ink actually sits, measured from the pixels rather than from
     // the model - this is what catches the stroke being re-shaped on lift.
-    // A rasteriser that anti-aliases differently moves neither the outline nor
-    // the centre of mass; smoothing, straightening or resampling moves both.
+    //
+    // Two measurements, both of which a re-shaped stroke would break and
+    // neither of which anti-aliasing can: the outline it occupies, and the
+    // line down the middle of it. The centreline is taken column by column,
+    // weighted by how dark each pixel is, so a rasteriser that lays down a
+    // heavier or lighter fringe on both sides of the stroke - which is what
+    // macOS does, and why it draws the same stroke with more ink pixels than
+    // Skia's software raster on X11 - cancels out instead of registering as
+    // movement. The path is drawn left to right and never doubles back, so
+    // each column has exactly one centre.
     const inkStats = (d) => {
-      let x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1, sx = 0, sy = 0, n = 0;
+      let x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1, n = 0;
+      const wy = new Float64Array(W), ww = new Float64Array(W);
       for (let i = 0; i < d.length; i += 4) {
-        if (d[i] > 200) continue;              // background is white
-        const px = i / 4, x = px % W, y = (px - x) / W;
+        const v = d[i];
+        if (v > 200) continue;                 // background is white
+        const px = i / 4, x = px % W, y = (px - x) / W, k = 255 - v;
         if (x < x0) x0 = x;
         if (x > x1) x1 = x;
         if (y < y0) y0 = y;
         if (y > y1) y1 = y;
-        sx += x; sy += y; n++;
+        wy[x] += y * k; ww[x] += k; n++;
       }
-      return { x0, y0, x1, y1, cx: n ? sx / n : 0, cy: n ? sy / n : 0, n };
+      return { x0, y0, x1, y1, wy, ww, n };
     };
     const A = inkStats(before), B = inkStats(after);
     const edgeShift = Math.max(Math.abs(A.x0 - B.x0), Math.abs(A.y0 - B.y0),
                                Math.abs(A.x1 - B.x1), Math.abs(A.y1 - B.y1));
-    const centreShift = Math.hypot(A.cx - B.cx, A.cy - B.cy);
+    let worstCol = 0, sumCol = 0, cols = 0;
+    for (let x = 0; x < W; x++) {
+      if (A.ww[x] < 255 || B.ww[x] < 255) continue;   // ignore a lone faint pixel
+      const dv = Math.abs(A.wy[x] / A.ww[x] - B.wy[x] / B.ww[x]);
+      if (dv > worstCol) worstCol = dv;
+      sumCol += dv; cols++;
+    }
+    const centreShift = cols ? sumCol / cols : 99;
 
     let diff = 0;
     for (let i = 0; i < before.length; i += 4) if (Math.abs(before[i] - after[i]) > 24) diff++;
@@ -621,7 +638,7 @@ async function run(win, app) {
 
     a.settings.inkWithMouse = 'auto'; a.setTool('select'); a.store.clear();
     return { wetPoints, storedPoints: s.points.length, changedPixels: diff,
-             total: before.length / 4, edgeShift, centreShift,
+             total: before.length / 4, edgeShift, centreShift, worstCol, cols,
              inkBefore: A.n, inkAfter: B.n, dpr: sf.dpr };
   `);
   check('lifting the pen keeps every point', fidelity.storedPoints === fidelity.wetPoints,
@@ -629,8 +646,9 @@ async function run(win, app) {
   // The stroke you were watching must not be redrawn differently when you lift.
   // Measured as geometry, so it means the same thing on every rasteriser.
   check('the stroke does not change shape when you lift',
-    fidelity.edgeShift <= 1 && fidelity.centreShift <= 0.5,
-    `outline moved ${fidelity.edgeShift}px, centre of mass ${fidelity.centreShift.toFixed(3)}px`);
+    fidelity.edgeShift <= 1 && fidelity.worstCol <= 1 && fidelity.cols > 300,
+    `outline moved ${fidelity.edgeShift}px, centreline worst ${fidelity.worstCol.toFixed(3)}px ` +
+    `mean ${fidelity.centreShift.toFixed(3)}px over ${fidelity.cols} columns`);
   // Belt and braces on top of the geometry check. macOS anti-aliases the ink
   // noticeably differently from Skia's software raster on X11 and Windows -
   // about 0.5% of the sampled box against 0.01% on Linux, all of it on the

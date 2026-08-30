@@ -15,6 +15,8 @@ const HANDLE_GRAB = 12;   // forgiving grab radius around a handle's 9px dot
 
 /** Gestures that should keep going while the canvas scrolls beneath them. */
 const EDGE_PANNABLE = new Set(['draw', 'erase', 'lasso', 'marquee', 'move', 'resize', 'rotate', 'shapeDraw', 'textDraw']);
+// 'laser' is deliberately absent: pointing near the edge of the window should
+// not drag the board out from under what you are pointing at.
 
 export class Interaction {
   constructor(app) {
@@ -30,6 +32,8 @@ export class Interaction {
     this.secondaryPan = null;   // mouse dragging the canvas while the pen draws
     this.lastMotion = null;     // last pointer position of the primary gesture
     this._edgeRaf = null;
+    this.rightPan = null;       // an in-flight right-button drag
+    this._eatNextMenu = false;  // a right-drag must not end in a context menu
 
     const c = this.canvas;
     c.addEventListener('pointerdown', (e) => this.onDown(e));
@@ -39,7 +43,18 @@ export class Interaction {
     c.addEventListener('pointerleave', (e) => { if (!this.action) { this.surface.hoverId = null; this.surface.invalidate(); } });
     c.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     c.addEventListener('dblclick', (e) => this.onDoubleClick(e));
-    c.addEventListener('contextmenu', (e) => { e.preventDefault(); this.app.showContextMenu(e); });
+    c.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      // A right-DRAG panned the canvas, so it is not a right-CLICK: swallow the
+      // menu this once. A plain right-click never sets this and is unaffected.
+      if (this._eatNextMenu) { this._eatNextMenu = false; return; }
+      // Some platforms raise contextmenu on press rather than release. There
+      // the menu wins and the drag is abandoned, which is exactly what happened
+      // before this existed - the feature is simply not gained there, and
+      // nothing that used to work is lost.
+      this.rightPan = null;
+      this.app.showContextMenu(e);
+    });
 
     this.surface.overlays.push((ctx, s) => this.drawOverlay(ctx, s));
   }
@@ -70,7 +85,18 @@ export class Interaction {
 
   /* ------------------------------------------------------------ */
   onDown(e) {
-    if (e.button === 2) { this.app.hideMenus(); return; }
+    if (e.button === 2) {
+      this.app.hideMenus();
+      // Right-drag pans, for anyone without a pen, a middle button or a
+      // trackpad. It starts nothing that touches the document, and a right
+      // click that does not move still opens the context menu as always.
+      if (this.app.settings.rightDragPans !== false) {
+        const sp0 = this.surface.screenPoint(e);
+        this.rightPan = { id: e.pointerId, sp: sp0, cam: { x: this.surface.cam.x, y: this.surface.cam.y }, moved: false };
+        try { this.canvas.setPointerCapture?.(e.pointerId); } catch { /* synthetic pointer */ }
+      }
+      return;
+    }
     try { this.canvas.setPointerCapture?.(e.pointerId); } catch { /* synthetic or already-released pointer */ }
     this.app.hideMenus();
     const sp = this.surface.screenPoint(e);
@@ -136,6 +162,10 @@ export class Interaction {
         }
         break;
       }
+      case 'laser':
+        this.surface.laser = [{ x: wp.x, y: wp.y, t: performance.now() }];
+        this.action = { type: 'laser' };
+        break;
       case 'pen': case 'highlighter': this.startStroke(e, wp, tool); break;
       case 'eraser': this.startErase(wp); break;
       case 'lasso':
@@ -170,7 +200,25 @@ export class Interaction {
     this.surface.invalidate();
   }
 
+  /** Advance a right-button drag. Returns true when it consumed the event. */
+  moveRightPan(e) {
+    const rp = this.rightPan;
+    if (!rp || e.pointerId !== rp.id) return false;
+    const sp = this.surface.screenPoint(e);
+    const dx = sp.x - rp.sp.x, dy = sp.y - rp.sp.y;
+    if (!rp.moved && Math.hypot(dx, dy) < TAP_SLOP) return true;   // still a click
+    rp.moved = true;
+    this.surface.cam.x = rp.cam.x + dx;
+    this.surface.cam.y = rp.cam.y + dy;
+    this.surface.clampCamera();
+    this.canvas.style.cursor = 'grabbing';
+    this.app.syncZoom();
+    this.surface.invalidate();
+    return true;
+  }
+
   onMove(e) {
+    if (this.moveRightPan(e)) return;
     if (e.pointerType === 'pen' && e.buttons) this.app.notePenSeen();
     const sp = this.surface.screenPoint(e);
     const wp = this.surface.cam.toWorld(sp.x, sp.y);
@@ -233,6 +281,12 @@ export class Interaction {
         this.eraseSweep(a, a.last, wp);
         a.last = wp;
         a.cursor = wp;
+        break;
+      }
+      case 'laser': {
+        const trail = this.surface.laser;
+        const last = trail[trail.length - 1];
+        if (!last || dist(last, wp) * this.surface.cam.z > 1.5) trail.push({ x: wp.x, y: wp.y, t: performance.now() });
         break;
       }
       case 'marquee': a.cur = wp; break;
@@ -302,6 +356,14 @@ export class Interaction {
   }
 
   onUp(e) {
+    if (this.rightPan && e.pointerId === this.rightPan.id) {
+      const moved = this.rightPan.moved;
+      this.rightPan = null;
+      // only a drag swallows the menu; a plain right-click still opens it
+      if (moved) this._eatNextMenu = true;
+      this.updateHover(this.surface.screenPoint(e), this.surface.cam.toWorld(0, 0), e.pointerType);
+      return;
+    }
     this.pointers.delete(e.pointerId);
     if (this.secondaryPan && e.pointerId === this.secondaryPan.id) { this.secondaryPan = null; return; }
     if (this.pinch) { if (this.pointers.size < 2) this.pinch = null; return; }
@@ -313,6 +375,7 @@ export class Interaction {
     const wp = this.surface.cam.toWorld(sp.x, sp.y);
 
     switch (a.type) {
+      case 'laser': break;            // the trail fades on its own
       case 'draw': this.finishStroke(a); break;
       case 'erase': this.finishErase(a); break;
       case 'marquee': {
@@ -613,11 +676,17 @@ export class Interaction {
     let changed = false;
 
     for (const o of hits) {
-      // In ink mode the eraser touches ink and nothing else: you must be able
-      // to annotate a picture or an imported page and rub the annotation off
-      // without destroying what is underneath. Whole objects go only in the
-      // explicit "erase whole objects" mode.
-      if (a.mode === 'partial' && o.type !== 'stroke') continue;
+      // The eraser touches ink and NOTHING else, in either mode.
+      //
+      // You must be able to annotate a picture or an imported page and rub the
+      // annotation off without destroying what is underneath - and a teacher
+      // scrubbing out a wrong answer over a slide must not lose the slide. The
+      // guard used to apply only in part-erase mode, so whole-stroke mode
+      // deleted images, notes, shapes and imported pages on contact.
+      //
+      // Removing a picture is what Select and Delete are for: deliberate,
+      // visible, and aimed at one thing.
+      if (o.type !== 'stroke') continue;
       const partial = a.mode === 'partial';
       const isFragment = a.fragments.has(o.id);
 
@@ -794,6 +863,12 @@ export class Interaction {
       return;
     }
 
+    if (t === 'laser') {                // a pointing tool wants a precise cursor
+      this.surface.hoverId = null;
+      this.canvas.style.cursor = 'crosshair';
+      return;
+    }
+
     if (t === 'select' || t === 'lasso') {
       const hit = pick(this.store, wp, 8 / this.surface.cam.z);
       this.surface.hoverId = hit ? hit.id : null;
@@ -897,6 +972,8 @@ export class Interaction {
     if (this._edgeRaf) return;
     const tick = () => {
       this._edgeRaf = null;
+    this.rightPan = null;       // an in-flight right-button drag
+    this._eatNextMenu = false;  // a right-drag must not end in a context menu
       if (!this.action || !this.lastMotion) return;
       const v = this.edgeVelocity(this.lastMotion.sp);
       if (!v) return;

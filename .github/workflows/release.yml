@@ -1,4 +1,4 @@
-# Builds GazBoard for Windows and Linux and publishes a GitHub Release.
+# Builds GazBoard for Windows, Linux and macOS and publishes a GitHub Release.
 #
 # To cut a release:
 #     git tag v1.16.1
@@ -115,5 +115,63 @@ jobs:
           files: |
             dist/*.AppImage
             dist/*.deb
+          name: GazBoard ${{ github.ref_name }}
+          generate_release_notes: true
+
+  macos:
+    # GitHub's macOS runners are Apple Silicon, and they can cross-build the
+    # Intel slice too, so one job produces both downloads. Free on public repos.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the test suite
+        run: npm run smoke:mac
+        # macOS runners have a window server, so there is no xvfb here
+
+      - name: Build for Apple Silicon and Intel
+        run: npx electron-builder --mac --arm64 --x64 --publish never
+        env:
+          # Nothing is signed yet: without this, electron-builder hunts for a
+          # Developer ID in the keychain and fails the build when it finds none.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Check the app was actually produced, and is launchable
+        run: |
+          set -e
+          ls -la dist/*.dmg dist/*.zip
+          APP="dist/mac-arm64/GazBoard.app"
+          [ -d "$APP" ] || APP="dist/mac/GazBoard.app"
+          echo "Inspecting $APP"
+          # Apple Silicon refuses to run a binary with no signature at all, so
+          # confirm the ad-hoc one is present before shipping the download.
+          codesign -dv "$APP" 2>&1 | head -5 || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$APP/Contents/Info.plist"
+
+      - name: Upload build output as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GazBoard-macos
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.blockmap
+          if-no-files-found: error
+
+      - name: Attach to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.zip
           name: GazBoard ${{ github.ref_name }}
           generate_release_notes: true

@@ -28,6 +28,7 @@ export class Surface {
     this.dirty = true;
     this.overlays = [];        // fn(ctx, surface) drawn in screen space
     this.wet = null;           // in-progress stroke object
+    this.laser = [];           // pointer trail: {x,y,t} world points, never saved
     this.selection = new Set();
     this.hoverId = null;
     this._raf = null;
@@ -118,9 +119,22 @@ export class Surface {
     return { x: p.x - pad, y: p.y - pad, w: b.w * this.cam.z + pad * 2, h: b.h * this.cam.z + pad * 2 };
   }
 
+  static LASER_LIFE = 850;       // ms a point stays visible
+
+  /** Drop trail points that have faded out. */
+  pruneLaser() {
+    if (!this.laser.length) return;
+    const cut = performance.now() - Surface.LASER_LIFE;
+    let i = 0;
+    while (i < this.laser.length && this.laser[i].t < cut) i++;
+    if (i) this.laser.splice(0, i);
+  }
+
   _onFrame() {
     this._raf = requestAnimationFrame(this._onFrame);
     this.resize();                 // cheap no-op unless the box or DPR moved
+    // a fading trail has to keep repainting even when nothing else changed
+    if (this.laser.length) { this.pruneLaser(); this.dirty = true; }
     if (!this.dirty) return;
     this.dirty = false;
     this.draw();
@@ -273,6 +287,97 @@ export class Surface {
     }
 
     for (const fn of this.overlays) fn(ctx, this);
+
+    // The laser goes on last: it is a pointing device, so it belongs above
+    // everything, selection handles included.
+    this.drawLaser(ctx);
+  }
+
+  /**
+   * The laser trail.
+   *
+   * Painted straight to the canvas from a list of timestamped points and never
+   * committed, so it is not in the document, not in the undo stack, not in an
+   * export, and gone a moment after the pointer stops. Points are kept in world
+   * coordinates so the dot stays on the word it is pointing at when the canvas
+   * is panned or zoomed underneath it.
+   */
+  drawLaser(ctx) {
+    const pts = this.laser;
+    if (!pts.length) return;
+    const now = performance.now();
+    const cam = this.cam;
+    const rgb = hexToRgb(this.laserColor || '#ff2d2d');
+    const head = pts[pts.length - 1];
+    const headFade = 1 - Math.min(1, (now - head.t) / Surface.LASER_LIFE);
+    if (headFade <= 0) return;
+
+    const sp = pts.map((p) => cam.toScreen(p.x, p.y));
+    const hp = sp[sp.length - 1];
+
+    ctx.save();
+    this.screenTransform(ctx);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // ONE path, stroked twice.
+    //
+    // The trail used to be a stroke per segment, each with its own alpha. Every
+    // joint therefore got a round cap painted on top of the next segment's
+    // round cap, so the alpha doubled at each one and the trail came out as a
+    // string of beads with visible edges. A single path has no interior caps -
+    // only joins, which composite once - so the fade has to come from a
+    // gradient along the path instead of from per-segment alpha.
+    if (sp.length > 1) {
+      const tail = sp[0];
+      const span = Math.hypot(hp.x - tail.x, hp.y - tail.y);
+      let paint;
+      if (span < 1) {
+        paint = `rgba(${rgb},${0.9 * headFade})`;       // pointer held still
+      } else {
+        const g = ctx.createLinearGradient(tail.x, tail.y, hp.x, hp.y);
+        g.addColorStop(0, `rgba(${rgb},0)`);
+        g.addColorStop(0.30, `rgba(${rgb},${0.16 * headFade})`);
+        g.addColorStop(0.70, `rgba(${rgb},${0.55 * headFade})`);
+        g.addColorStop(1, `rgba(${rgb},${0.95 * headFade})`);
+        paint = g;
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(sp[0].x, sp[0].y);
+      if (sp.length === 2) {
+        ctx.lineTo(sp[1].x, sp[1].y);
+      } else {
+        // curve through the midpoints, the way the ink renderer does, so the
+        // trail is smooth rather than a chain of straight pieces
+        for (let i = 1; i < sp.length - 1; i++) {
+          const m = { x: (sp[i].x + sp[i + 1].x) / 2, y: (sp[i].y + sp[i + 1].y) / 2 };
+          ctx.quadraticCurveTo(sp[i].x, sp[i].y, m.x, m.y);
+        }
+        ctx.lineTo(hp.x, hp.y);
+      }
+
+      // soft halo first, then the core on top of it
+      ctx.strokeStyle = paint;
+      ctx.globalAlpha = 0.30;
+      ctx.lineWidth = 11;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 3.5;
+      ctx.stroke();
+    }
+
+    // the bright head, so a pointer that is not moving is still visible
+    const glow = ctx.createRadialGradient(hp.x, hp.y, 0, hp.x, hp.y, 13);
+    glow.addColorStop(0, `rgba(${rgb},${0.95 * headFade})`);
+    glow.addColorStop(0.35, `rgba(${rgb},${0.45 * headFade})`);
+    glow.addColorStop(1, `rgba(${rgb},0)`);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(hp.x, hp.y, 13, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = `rgba(255,255,255,${0.75 * headFade})`;
+    ctx.beginPath(); ctx.arc(hp.x, hp.y, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
   }
 
   /**
@@ -326,4 +431,14 @@ export class Surface {
     }
     return c;
   }
+}
+
+/**
+ * "#ff2d2d" -> "255,45,45", so alpha can be varied inside a gradient stop.
+ * Falls back to the default laser red rather than throwing on a bad value.
+ */
+function hexToRgb(hex) {
+  const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(String(hex).trim());
+  if (!m) return '255,45,45';
+  return [1, 2, 3].map((i) => parseInt(m[i], 16)).join(',');
 }

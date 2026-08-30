@@ -28,16 +28,42 @@ const bytesToDataUrl = (buf, mime) => new Promise((res) => {
 
 const mimeFor = (ext) => ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml' }[ext] || 'image/png');
 
-/** Sniff the real file type from its magic bytes so a renamed executable can't pass as an image. */
+/**
+ * Sniff the real file type from its magic bytes so a renamed executable can't
+ * pass as an image.
+ *
+ * From a contribution by @anupamme (PR #1). The WEBP fourcc check at offset 8
+ * is the one addition: "RIFF" alone is any RIFF container, a .wav among them.
+ *
+ * This is defence in depth rather than a hole being closed - a renamed binary
+ * served as a data: URL cannot execute, it simply fails to decode. What it
+ * genuinely buys is refusing to hand unverified bytes to an SVG parser, and
+ * telling you the file is wrong instead of failing later with "Could not read
+ * image".
+ */
 function looksLikeImage(buf, ext) {
   const b = new Uint8Array(buf);
   if (ext === 'png') return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47;
   if (ext === 'jpg' || ext === 'jpeg') return b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF;
   if (ext === 'gif') return b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46;
   if (ext === 'bmp') return b[0] === 0x42 && b[1] === 0x4D;
-  if (ext === 'webp') return b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46;
+  if (ext === 'webp') return b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
+    && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50;
   if (ext === 'svg') return /^\s*(<\?xml|<svg)/i.test(new TextDecoder().decode(b.slice(0, 256)));
   return false;
+}
+
+/** Exposed so the suite can check the sniffer without touching the filesystem. */
+export const looksLikeImageForTest = looksLikeImage;
+
+/** Name every file that was turned away, so a skipped import is never silent. */
+function reportRejected(app, rejected) {
+  if (!rejected.length) return;
+  const names = rejected.slice(0, 3).join(', ');
+  const more = rejected.length > 3 ? ` and ${rejected.length - 3} more` : '';
+  app.toast(rejected.length === 1
+    ? `${names} is not the image it claims to be — skipped`
+    : `${rejected.length} files are not the images they claim to be — skipped: ${names}${more}`, 'help', 4200);
 }
 
 function measure(dataUrl) {
@@ -61,13 +87,18 @@ export function dropOrigin(app, w, h) {
 
 export async function insertImagesFromPaths(app, paths) {
   const objs = [];
+  const rejected = [];
   for (const p of paths) {
     const ext = p.split('.').pop().toLowerCase();
     if (!IMAGE_EXT.includes(ext)) continue;
+    const name = p.split(/[\\/]/).pop();
     const buf = await window.board.readFile(p);
+    // the extension says what it is; the bytes decide
+    if (!looksLikeImage(buf, ext)) { rejected.push(name); continue; }
     const dataUrl = await bytesToDataUrl(buf, mimeFor(ext));
-    objs.push(await makeImageObject(app, dataUrl, p.split(/[\\/]/).pop(), objs.length));
+    objs.push(await makeImageObject(app, dataUrl, name, objs.length));
   }
+  reportRejected(app, rejected);
   if (objs.length) {
     app.store.addMany(objs, 'insert image');
     app.setSelection(objs.map((o) => o.id));
@@ -78,11 +109,21 @@ export async function insertImagesFromPaths(app, paths) {
 
 export async function insertImageFiles(app, files, at) {
   const objs = [];
+  const rejected = [];
   for (const f of files) {
     if (!f.type.startsWith('image/')) continue;
+    // A dropped file arrives with a MIME type the OS guessed from its name, so
+    // this path needs the same check - more so, since nothing here ever looked
+    // at an extension in the first place.
+    const ext = (f.name.split('.').pop() || '').toLowerCase();
+    if (IMAGE_EXT.includes(ext)) {
+      const head = await f.slice(0, 256).arrayBuffer();
+      if (!looksLikeImage(head, ext)) { rejected.push(f.name); continue; }
+    }
     const dataUrl = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f); });
     objs.push(await makeImageObject(app, dataUrl, f.name, objs.length, at));
   }
+  reportRejected(app, rejected);
   if (objs.length) {
     app.store.addMany(objs, 'insert image');
     app.setSelection(objs.map((o) => o.id));

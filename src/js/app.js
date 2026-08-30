@@ -7,12 +7,14 @@ import { Interaction } from './core/tools.js';
 import { pick } from './core/hit.js';
 import { uid, debounce, clamp, unionBox } from './core/util.js';
 import { pageRects, stripBounds, pageIndexForBox, nearestPageIndex, offsetIntoRect, PAGE_GAP } from './core/pages.js';
+import { isNewer } from './core/version.js';
 import { TextEditor } from './ui/textedit.js';
 import { initToolbar, syncToolbar } from './ui/toolbar.js';
 import { createPanels } from './ui/panels.js';
 import { showContextMenu, updateSelectionBar } from './ui/contextmenu.js';
 import { closePopover, h } from './ui/popover.js';
 import { icon } from './ui/icons.js';
+import { PENS } from './ui/palettes.js';
 import { exportPng, exportSvg, exportPdf, saveBoardFile, openBoardFile } from './export.js';
 import {
   pickAndInsertDocument, pickAndInsertImage, insertDocument,
@@ -28,7 +30,10 @@ const DEFAULT_SETTINGS = {
   textColor: '#201f1e', textSize: 32, textFont: 'hand',
   shapeKind: 'rect', shapeStroke: '#201f1e', shapeFill: 'none', shapeLineWidth: 3, shapeDash: null,
   inkToShape: false, pressure: true, wheelZoom: false, returnToSelect: true, autosave: true,
-  edgePan: true, importQuality: 2, lowLatencyInk: false,
+  edgePan: true, importQuality: 2, lowLatencyInk: false, laserColor: '#ff2d2d', showToolKeys: true,
+  rightDragPans: true, hintsSeen: {},
+  // null = never asked. Nothing reaches the network until this is true.
+  updateCheck: null, lastUpdateCheck: 0, skippedVersion: null,
   // 'auto' follows Whiteboard: the mouse inks until a stylus shows up, then it
   // becomes a pan-only device. 'yes' / 'no' pin it either way.
   inkWithMouse: 'auto', penSeen: false
@@ -50,6 +55,9 @@ class App {
     this.wireGlobalEvents();
     this.wireStore();
     this.restoreLastBoard();
+    // after the board is up, never before: the first thing anyone sees should
+    // be their work, not a question
+    setTimeout(() => this.startUpdateFlow(), 2500);
     this.setTool('pen');
     this.syncUI();
   }
@@ -168,6 +176,18 @@ class App {
     requestAnimationFrame(settle);
   }
 
+  /**
+   * Start a blank board.
+   *
+   * `silent` separates the two reasons this happens, and they want opposite
+   * things. Silent means the app decided - first launch with nothing to
+   * restore, or the board under you was just deleted - and an empty board that
+   * nobody asked for must not be written to disk, or every launch would leave
+   * an "Untitled board" behind. Not silent means someone clicked New board,
+   * which is a deliberate act: that board is written straight away so it
+   * appears in the Boards list immediately, instead of materialising later when
+   * the first mark happens to be made.
+   */
   newBoard(silent = false) {
     this.store.reset();
     this.surface.selection.clear();
@@ -176,11 +196,33 @@ class App {
     this.syncUI();
     this.surface.invalidate();
     if (!silent) this.toast('New board');
-    // An empty board is not written until something is put on it. Saving it
-    // straight away left a fresh "Untitled board" behind on every launch.
     this.unsavedNew = true;
     document.getElementById('savedBadge').textContent = 'Saved';
     window.board.boards.setLast(this.store.doc.id);
+    // kept so callers (and the suite) can wait for the board to be on disk
+    this.pendingWrite = silent ? Promise.resolve() : this.persist({ force: true });
+  }
+
+  /**
+   * Delete a board, and never leave the deleted one open.
+   *
+   * Removing the file is not enough on its own: if the board being deleted is
+   * the one on screen, the document in memory still carries its id, so the
+   * next autosave writes it straight back and it returns from the dead the
+   * moment anything is drawn. Whatever was open has to be replaced by a fresh,
+   * empty board with a new id.
+   *
+   * @returns {boolean} whether the board that was deleted was the open one
+   */
+  async deleteBoard(id) {
+    const wasOpen = id === this.store.doc.id;
+    await window.board.boards.remove(id);
+    if (wasOpen) {
+      this.textEditor.cancel();
+      this.newBoard(true);          // silent: nobody asked for this board
+      this.toast('Board deleted');
+    }
+    return wasOpen;
   }
 
   async loadBoard(data, opts = {}) {
@@ -239,7 +281,9 @@ class App {
     if (this.tool === tool) return;
     this.textEditor.commit();
     this.tool = tool;
-    if (tool !== 'select' && tool !== 'lasso') this.setSelection([]);
+    if (tool !== 'laser') this.surface.laser.length = 0;   // no stale dot left behind
+    // panning is a view change, not an edit - it must not throw a selection away
+    if (tool !== 'select' && tool !== 'lasso' && tool !== 'pan') this.setSelection([]);
     this.syncUI();
     this.surface.invalidate();
   }
@@ -533,6 +577,7 @@ class App {
         break;
       case 'help.shortcuts': this.showShortcuts(); break;
       case 'help.about': this.showAbout(); break;
+      case 'help.checkUpdates': this.checkForUpdates({ force: true, silent: false }); break;
       default: break;
     }
     this.syncUI();
@@ -625,6 +670,35 @@ class App {
     if (label) label.textContent = `Page ${i + 1} of ${n}`;
     bar.querySelector('[data-page="prev"]').disabled = i <= 0;
     bar.querySelector('[data-page="next"]').disabled = i >= n - 1;
+  }
+
+  /**
+   * A one-off tip in the top-right corner.
+   *
+   * Shown once per subject and never again - a hint that keeps reappearing is
+   * an advert. It is passive: it steals no focus, blocks nothing, and closes
+   * itself. `id` is what makes it one-off, so give each tip its own.
+   */
+  showHint(id, html, ms = 11000) {
+    const host = document.getElementById('hints');
+    if (!host) return false;
+    const seen = this.settings.hintsSeen || (this.settings.hintsSeen = {});
+    if (seen[id]) return false;
+
+    const close = h('button', { class: 'hint-x', title: 'Dismiss', html: icon('close', 13) });
+    const el = h('div', { class: 'hint' }, h('div', { html }), close);
+    const go = () => {
+      if (!el.isConnected) return;
+      el.classList.add('go');
+      setTimeout(() => el.remove(), 320);
+    };
+    const remember = () => { seen[id] = true; this.saveSettings(); };
+    close.addEventListener('click', () => { remember(); go(); });
+    host.appendChild(el);
+    // seeing it counts, whether or not it is dismissed by hand
+    remember();
+    setTimeout(go, ms);
+    return true;
   }
 
   /** A big centred readout while zooming, the way Whiteboard shows it. */
@@ -984,7 +1058,14 @@ class App {
    * @param {{id:string,label:string,primary?:boolean}[]} choices
    * @returns {Promise<string|null>} the chosen id, or null if cancelled
    */
-  choose(title, text, choices) {
+  /**
+   * @param {object} opts
+   * @param {boolean} opts.cancel  show a Cancel button (default true). Turn it
+   *   off for a question whose own answers already cover every outcome - a
+   *   third button that means neither yes nor no just invites a null the
+   *   caller then has to guess the meaning of.
+   */
+  choose(title, text, choices, { cancel = true } = {}) {
     return new Promise((resolve) => {
       const overlay = document.getElementById('overlay');
       const card = document.getElementById('overlayCard');
@@ -994,8 +1075,8 @@ class App {
       document.addEventListener('keydown', onKey, true);
       card.appendChild(h('h3', {}, title));
       card.appendChild(h('p', {}, text));
-      const row = h('div', { class: 'actions', style: 'flex-wrap:wrap;gap:8px' },
-        h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'));
+      const row = h('div', { class: 'actions', style: 'flex-wrap:wrap;gap:8px' });
+      if (cancel) row.appendChild(h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'));
       for (const c of choices) {
         row.appendChild(h('button', { class: 'btn' + (c.primary ? ' primary' : ''), onclick: () => done(c.id) }, c.label));
       }
@@ -1019,11 +1100,104 @@ class App {
     });
   }
 
+  /* ================================================================= *
+   *  Updates
+   *
+   *  GazBoard has no account, no telemetry and no cloud, and an update check
+   *  is the single exception - so it is the single thing the app asks
+   *  permission for. Until that question is answered, nothing is sent
+   *  anywhere. The check itself only reads: it fetches the newest release tag
+   *  from a public endpoint and compares it with this build's version. It
+   *  never downloads or installs anything; the most it will do is offer to
+   *  open the releases page in your browser.
+   * ================================================================= */
+  static UPDATE_INTERVAL = 24 * 60 * 60 * 1000;
+
+  /** Consent first if it has never been given, otherwise a quiet daily look. */
+  async startUpdateFlow() {
+    try {
+      if ((await this.appInfo())?.smoke) return;
+      this.showHint('panning',
+        'Moving around: drag with the <b>middle mouse button</b>, hold <b>Space</b> and drag, '
+        + 'or pick the <b>Pan</b> tool (<b>G</b>) from the toolbar. The right button drags too, '
+        + 'and the scroll wheel works as usual.');
+      if (this.settings.updateCheck === null || this.settings.updateCheck === undefined) await this.askAboutUpdates();
+      else if (this.settings.updateCheck) await this.checkForUpdates({ silent: true });
+    } catch { /* an update check must never be able to break the app */ }
+  }
+
+  /** Ask once, on the first launch that gets far enough to matter. */
+  async askAboutUpdates() {
+    if (this.settings.updateCheck !== null && this.settings.updateCheck !== undefined) return;
+    const answer = await this.choose(
+      'Check for updates?',
+      'GazBoard can ask GitHub once a day whether a newer version has been released, and tell you if there is one. It never downloads or installs anything on its own, and nothing about you or your boards is ever sent. Everything else in the app stays offline either way.',
+      [{ id: 'yes', label: 'Yes, tell me about updates', primary: true },
+       { id: 'no', label: 'No, stay fully offline' }],
+      { cancel: false }
+    );
+    // Escape, or anything that is not a real answer, means "not now" - leave
+    // the question unanswered so it is asked again rather than silently
+    // recording a no that can never be revisited.
+    if (answer !== 'yes' && answer !== 'no') return;
+    this.settings.updateCheck = answer === 'yes';
+    this.saveSettings();
+    if (answer === 'yes') this.checkForUpdates({ silent: true });
+  }
+
+  /**
+   * @param {object} opts
+   * @param {boolean} opts.silent   say nothing when already up to date
+   * @param {boolean} opts.force    ignore the once-a-day limit and any skip
+   */
+  async checkForUpdates({ silent = false, force = false } = {}) {
+    if (!force) {
+      if (!this.settings.updateCheck) return null;
+      if (Date.now() - (this.settings.lastUpdateCheck || 0) < App.UPDATE_INTERVAL) return null;
+    }
+    const res = await window.board.checkForUpdate();
+    this.settings.lastUpdateCheck = Date.now();
+    this.saveSettings();
+
+    if (!res || !res.ok) {
+      if (!silent) this.toast(res?.error ? `Could not check: ${res.error}` : 'Could not check for updates', 'help');
+      return null;
+    }
+    const mine = (await this.appInfo())?.version || '0.0.0';
+    if (!isNewer(res.version, mine)) {
+      if (!silent) this.toast(`You are on the latest version (${mine})`);
+      return null;
+    }
+    // a prerelease is never pushed at someone on a stable build
+    if (res.prerelease && !force) return null;
+    if (!force && this.settings.skippedVersion === res.version) return null;
+
+    const answer = await this.choose(
+      `GazBoard ${res.version} is available`,
+      `You are running ${mine}. The download page opens in your browser — your boards and settings are untouched by installing over the top.`,
+      [{ id: 'open', label: 'Open the download page', primary: true },
+       { id: 'later', label: 'Later' },
+       { id: 'skip', label: `Skip ${res.version}` }]
+    );
+    if (answer === 'open') await window.board.openReleases(res.url);
+    else if (answer === 'skip') { this.settings.skippedVersion = res.version; this.saveSettings(); }
+    return res;
+  }
+
+  /** Cached app:info, so the version is not re-fetched on every call. */
+  async appInfo() {
+    if (!this._appInfo) this._appInfo = await window.board.info();
+    return this._appInfo;
+  }
+
   showShortcuts() {
     const rows = [
       ['h', 'Tools'],
-      ['Select', 'V'], ['Lasso select', 'L'], ['Pen', 'P'], ['Highlighter', 'H'], ['Eraser', 'E'],
+      ['Select', 'V'], ['Lasso select', 'L'], ['Laser pointer', 'X'], ['Pan the canvas', 'G'],
+      ['Pen (last colour used)', 'P'], ['Highlighter', 'H'], ['Eraser', 'E'],
       ['Sticky note', 'N'], ['Text', 'T'], ['Shape', 'S'], ['Ruler', 'Ctrl+R'],
+      ['h', 'Pens'],
+      ...PENS.map((pen, i) => [pen.label, String(i + 1)]),
       ['h', 'Canvas'],
       ['Pan', 'Space + drag, or middle-drag'], ['Zoom', 'Ctrl + wheel, or pinch'],
       ['Pan while drawing', 'Hold any mouse button, or scroll'],
@@ -1050,7 +1224,8 @@ class App {
     card.innerHTML = '';
     card.appendChild(h('h3', {}, 'Keyboard shortcuts'));
     card.appendChild(grid);
-    card.appendChild(h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: () => overlay.classList.remove('show') }, 'Close')));
+    card.appendChild(h('div', { class: 'actions' },
+      h('button', { class: 'btn primary', onclick: () => overlay.classList.remove('show') }, 'Close')));
     overlay.classList.add('show');
   }
 
@@ -1062,7 +1237,7 @@ class App {
     card.appendChild(h('h3', { style: 'margin-bottom:2px' }, 'GazBoard ' + i.version));
     card.appendChild(h('p', {
       style: 'margin:0 0 14px;font-size:13px;color:var(--text-2);letter-spacing:.02em',
-      html: 'by <b style="color:var(--accent)">theBoringCode</b>'
+      html: 'by <b style="color:var(--accent)">theBoringCodes</b>'
     }));
     card.appendChild(h('p', { html:
       `A free-form digital whiteboard for pen, sticky notes, shapes, text, images and documents.` +
@@ -1078,7 +1253,17 @@ class App {
       html:
         `Office import: <b>${i.libreoffice ? 'LibreOffice detected (high fidelity)' : 'built-in converter (install LibreOffice for higher fidelity)'}</b><br>` +
         `Electron ${i.electron} · Chromium ${i.chrome}` }));
-    card.appendChild(h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: () => overlay.classList.remove('show') }, 'Close')));
+    // Next to the version number is where anyone looks for this.
+    const check = h('button', { class: 'btn' }, 'Check for updates');
+    check.addEventListener('click', async () => {
+      check.textContent = 'Checking…';
+      check.setAttribute('disabled', '');
+      overlay.classList.remove('show');
+      await this.checkForUpdates({ force: true });
+    });
+    card.appendChild(h('div', { class: 'actions' },
+      check,
+      h('button', { class: 'btn primary', onclick: () => overlay.classList.remove('show') }, 'Close')));
     overlay.classList.add('show');
   }
 
@@ -1240,7 +1425,24 @@ class App {
       }
     }
 
-    const keyTool = { v: 'select', l: 'lasso', p: 'pen', h: 'highlighter', e: 'eraser', n: 'note', t: 'text', s: 'shape' }[e.key.toLowerCase()];
+    // 1-6 reach straight for a pen from the tray. Switching colour mid-sentence
+    // is the commonest thing anyone does while teaching, and doing it by number
+    // beats travelling to the toolbar with the mouse.
+    if (e.key >= '1' && e.key <= '9') {
+      const pen = PENS[Number(e.key) - 1];
+      if (pen) {
+        e.preventDefault();
+        this.settings.penColor = pen.color;
+        this.settings.penEffect = pen.effect;
+        this.saveSettings();
+        this.setTool('pen');
+        this.syncUI();
+        this.toast(pen.label, 'pen');
+        return;
+      }
+    }
+
+    const keyTool = { v: 'select', l: 'lasso', p: 'pen', h: 'highlighter', e: 'eraser', n: 'note', t: 'text', s: 'shape', x: 'laser', g: 'pan' }[e.key.toLowerCase()];
     if (keyTool) { this.setTool(keyTool); return; }
     if (e.key === '?') this.showShortcuts();
   }

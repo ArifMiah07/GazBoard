@@ -32,6 +32,9 @@ export function initToolbar(app) {
     if (opts.pop) b.dataset.pop = opts.pop;
     b.innerHTML = icon(opts.icon, 20);
     if (opts.dot) b.appendChild(h('span', { class: 'dot' }));
+    // The shortcut letter lives on the button. Nobody memorises a shortcut
+    // sheet mid-lesson; seeing "P" under the pen is what makes them get used.
+    if (opts.key) b.appendChild(h('span', { class: 'kbd' }, opts.key));
     b.addEventListener('click', (e) => opts.onClick(e, b));
     bar.appendChild(b);
     return b;
@@ -43,16 +46,23 @@ export function initToolbar(app) {
     if (was) openToolPopover(app, b, tool); else closePopover();
   };
 
-  iconTool({ tool: 'select', icon: 'select', title: 'Select (V)', onClick: () => app.setTool('select') });
-  iconTool({ tool: 'lasso', icon: 'lasso', title: 'Lasso select (L)', onClick: () => app.setTool('lasso') });
+  iconTool({ tool: 'select', icon: 'select', key: 'V', title: 'Select (V)', onClick: () => app.setTool('select') });
+  iconTool({ tool: 'lasso', icon: 'lasso', key: 'L', title: 'Lasso select (L)', onClick: () => app.setTool('lasso') });
+  iconTool({ tool: 'pan', icon: 'hand', key: 'G', title: 'Pan the canvas (G) \u2014 drag to move around. Space, the middle mouse button and the scroll wheel do this too',
+    onClick: () => app.setTool('pan') });
+  iconTool({ tool: 'laser', icon: 'laser', key: 'X', title: 'Laser pointer (X) \u2014 leaves a trail that fades; nothing is saved',
+    onClick: () => app.setTool('laser') });
   sep();
 
   /* ---- the pen tray ---- */
   for (const pen of PENS) {
-    const b = h('button', { class: 'pen', title: pen.label + ' \u2014 click again for thickness' });
+    const b = h('button', { class: 'pen', title: `${pen.label} (${PENS.indexOf(pen) + 1}) \u2014 click again for thickness` });
     b.dataset.pen = pen.id;
     if (pen.id === 'black') b.dataset.tool = 'pen';       // the canonical pen button
-    b.innerHTML = penIcon(pen.color, pen.effect) + '<span class="size-dot"></span>';
+    // every pen wears its own number: 1-6 reach them directly, which is the
+    // whole point of putting the keys on the buttons
+    b.innerHTML = penIcon(pen.color, pen.effect) + '<span class="size-dot"></span>'
+      + `<span class="kbd">${PENS.indexOf(pen) + 1}</span>`;
     b.addEventListener('click', () => {
       const s = app.settings;
       const held = app.tool === 'pen' && s.penColor === pen.color && s.penEffect === pen.effect;
@@ -68,23 +78,23 @@ export function initToolbar(app) {
 
   const hl = h('button', { class: 'pen', title: 'Highlighter (H) \u2014 click again for options' });
   hl.dataset.tool = 'highlighter';
-  hl.innerHTML = penIcon(app.settings.highlighterColor, 'none', 'highlighter');
+  hl.innerHTML = penIcon(app.settings.highlighterColor, 'none', 'highlighter') + '<span class="kbd">H</span>';
   hl.addEventListener('click', (e) => toggleTool('highlighter')(e, hl));
   bar.appendChild(hl);
 
   const er = h('button', { class: 'pen', title: 'Eraser (E) \u2014 click again for options' });
   er.dataset.tool = 'eraser';
-  er.innerHTML = penIcon('#f7a8c4', 'none', 'eraser');
+  er.innerHTML = penIcon('#f7a8c4', 'none', 'eraser') + '<span class="kbd">E</span>';
   er.addEventListener('click', (e) => toggleTool('eraser')(e, er));
   bar.appendChild(er);
   sep();
 
   iconTool({ cmd: 'ruler', icon: 'ruler', title: 'Ruler (Ctrl+R)', onClick: () => app.command('ruler') });
-  iconTool({ tool: 'text', icon: 'text', dot: true, title: 'Text (T) \u2014 click again for font and size',
+  iconTool({ tool: 'text', icon: 'text', dot: true, key: 'T', title: 'Text (T) \u2014 click again for font and size',
     onClick: toggleTool('text') });
-  iconTool({ tool: 'note', icon: 'note', dot: true, title: 'Sticky note (N) \u2014 click again for colours',
+  iconTool({ tool: 'note', icon: 'note', dot: true, key: 'N', title: 'Sticky note (N) \u2014 click again for colours',
     onClick: toggleTool('note') });
-  iconTool({ tool: 'shape', icon: 'shapes', dot: true, title: 'Shapes (S)', onClick: toggleTool('shape') });
+  iconTool({ tool: 'shape', icon: 'shapes', dot: true, key: 'S', title: 'Shapes (S)', onClick: toggleTool('shape') });
   iconTool({ cmd: 'insert.image', icon: 'image', title: 'Insert image', onClick: () => app.command('insert.image') });
   iconTool({ cmd: 'insert', icon: 'insert', pop: 'insert', title: 'Insert document, table or template',
     onClick: (e, b) => openInsertPopover(app, b) });
@@ -273,7 +283,7 @@ export function openToolPopover(app, anchor, tool) {
       h('h4', { style: 'margin-top:14px' }, 'Mode'),
       h('div', { class: 'menu', style: 'padding:0' },
         mkMode('partial', 'Erase parts of ink', 'Rubs strokes out where you drag'),
-        mkMode('object', 'Erase whole objects', 'Removes a whole stroke in one touch'),
+        mkMode('object', 'Erase whole strokes', 'Removes a whole stroke in one touch'),
         mkMode('all', 'Erase everything', 'Clears the canvas'))
     );
   } else if (tool === 'note') {
@@ -369,6 +379,8 @@ export function openMorePopover(app, anchor) {
     h('div', { class: 'menu-sep' }),
     menuItem('Settings', 'settings', () => app.panels.settings()),
     menuItem('Keyboard shortcuts', 'help', () => app.showShortcuts()),
+    menuItem('Check for updates…', 'update', () => app.checkForUpdates({ force: true })),
+    menuItem('About GazBoard', 'board', () => app.showAbout()),
     menuItem('Clear canvas', 'trash', () => app.command('edit.clear'), { danger: true })
   );
   openPopover(anchor, body, { key: 'more' });
@@ -394,6 +406,7 @@ export function syncToolbar(app) {
   const s = app.settings;
 
   syncPagebar(app);
+  bar.classList.toggle('hide-keys', s.showToolKeys === false);
 
   for (const b of bar.querySelectorAll('.pen[data-pen]')) {
     const pen = PENS.find((p) => p.id === b.dataset.pen);
@@ -403,7 +416,9 @@ export function syncToolbar(app) {
   const hl = bar.querySelector('.pen[data-tool="highlighter"]');
   if (hl) {
     hl.classList.toggle('active', app.tool === 'highlighter');
-    const want = penIcon(s.highlighterColor, 'none', 'highlighter');
+    // the badge is part of the button, so it has to be re-added when the
+    // highlighter is repainted or recolouring silently drops the "H"
+    const want = penIcon(s.highlighterColor, 'none', 'highlighter') + '<span class="kbd">H</span>';
     if (hl.dataset.paint !== s.highlighterColor) { hl.innerHTML = want; hl.dataset.paint = s.highlighterColor; }
   }
   const er = bar.querySelector('.pen[data-tool="eraser"]');

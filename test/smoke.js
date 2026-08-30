@@ -188,6 +188,67 @@ async function run(win, app) {
   check('undo restores the erased stroke', erase.restoredPts === 101, erase.restoredPts + ' points');
   check('eraser near-miss leaves ink alone', erase.untouched);
   check('object mode erases the whole stroke', erase.wholeGone);
+
+  /* ---- the eraser is an INK tool ---- *
+   * Whole-stroke mode had no type guard, so a scrub across a slide deleted the
+   * slide. Annotating an imported page and rubbing the annotation off has to
+   * leave the page there, in both modes.
+   */
+  const inkOnly = await js(`
+    const a = window.app;
+    const inter = a.interaction;
+    const r = {};
+
+    const build = () => {
+      a.newBoard(true);
+      a.store.clear();
+      // an imported page, a picture, a note, a text box and a shape
+      const px = document.createElement('canvas'); px.width = px.height = 8;
+      const url = px.toDataURL('image/png');
+      a.store.add({ id: 'page', type: 'image', kind: 'page', x: -300, y: -200, w: 600, h: 400,
+                    rotation: 0, src: url, name: 'doc', label: 'p1' }, 'x');
+      a.store.add({ id: 'pic', type: 'image', x: -280, y: -180, w: 120, h: 90, rotation: 0, src: url, name: 'i' }, 'x');
+      a.store.add({ id: 'note', type: 'note', x: -100, y: -100, w: 160, h: 160, text: 'n',
+                    color: '#ffd94a', rotation: 0, align: 'center', font: 'ui' }, 'x');
+      a.store.add({ id: 'txt', type: 'text', x: 40, y: -60, w: 200, h: 40, text: 'hello', rotation: 0,
+                    color: '#000', fontSize: 24, align: 'left', valign: 'top', font: 'ui', background: 'none' }, 'x');
+      a.store.add({ id: 'shp', type: 'shape', kind: 'rect', x: 80, y: 40, w: 120, h: 90,
+                    rotation: 0, stroke: '#000', fill: 'none', lineWidth: 3 }, 'x');
+      // ink laid right across all of them
+      const pts = []; for (let i = 0; i < 60; i++) pts.push({ x: -280 + i * 9, y: -20 + Math.sin(i / 5) * 6, p: .6 });
+      a.store.add({ id: 'ink', type: 'stroke', tool: 'pen', color: '#e81123', width: 6, effect: 'none',
+                    points: pts, bbox: { x: -280, y: -30, w: 540, h: 20 }, rotation: 0 }, 'x');
+    };
+    const survivors = () => ['page', 'pic', 'note', 'txt', 'shp'].filter(id => a.store.has(id));
+
+    // --- whole-stroke mode: scrub straight across everything
+    build();
+    a.settings.eraserMode = 'object';
+    a.setTool('eraser');
+    inter.startErase({ x: -280, y: -20 });
+    for (let i = 1; i <= 60; i++) inter.eraseSweep(inter.action, { x: -280 + (i - 1) * 9, y: -20 }, { x: -280 + i * 9, y: -20 });
+    if (inter.action) { inter.finishErase(inter.action); inter.action = null; }
+    r.objectMode = { survived: survivors(), inkGone: !a.store.has('ink') };
+
+    // --- part-erase mode: same scrub
+    build();
+    a.settings.eraserMode = 'partial';
+    inter.startErase({ x: -280, y: -20 });
+    for (let i = 1; i <= 60; i++) inter.eraseSweep(inter.action, { x: -280 + (i - 1) * 9, y: -20 }, { x: -280 + i * 9, y: -20 });
+    if (inter.action) { inter.finishErase(inter.action); inter.action = null; }
+    r.partialMode = { survived: survivors(), inkGone: !a.store.has('ink') };
+
+    a.settings.eraserMode = 'partial';
+    a.setTool('pen');
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  check('erasing whole strokes never touches images, pages, notes, text or shapes',
+    inkOnly.objectMode.survived.length === 5 && inkOnly.objectMode.inkGone === true,
+    JSON.stringify(inkOnly.objectMode));
+  check('and neither does part-erase',
+    inkOnly.partialMode.survived.length === 5 && inkOnly.partialMode.inkGone === true,
+    JSON.stringify(inkOnly.partialMode));
   check('erasing an end leaves one shorter run', erase.tailCount === 1 && erase.tailW < 500 && erase.tailW > 400, `${erase.tailCount} run(s), width ${erase.tailW}`);
 
   /* ---- the canvas must always fill the window ---- */
@@ -1384,10 +1445,12 @@ async function run(win, app) {
       inkSplit: a.store.objects.filter(o => o.type === 'stroke').length
     };
 
-    // object mode: the explicit "remove whole things" mode still does
+    // whole-stroke mode: still only ink. This used to assert the opposite -
+    // that scrubbing over an imported page deleted the page - which is exactly
+    // the behaviour that had to go.
     a.settings.eraserMode = 'object';
     sweep({ x: 300, y: 200 }, { x: 300, y: 260 });
-    const objectMode = { pageGone: !a.store.has('page') };
+    const objectMode = { pageKept: a.store.has('page'), noteKept: a.store.has('note') };
 
     a.settings.eraserMode = 'partial'; a.store.clear();
     return { inkMode, objectMode };
@@ -1395,7 +1458,8 @@ async function run(win, app) {
   check('the ink eraser leaves pictures and pages alone', eraseSafe.inkMode.pageKept && eraseSafe.inkMode.noteKept,
     `page kept ${eraseSafe.inkMode.pageKept}, note kept ${eraseSafe.inkMode.noteKept}`);
   check('the ink eraser still cuts the ink on top', eraseSafe.inkMode.inkSplit === 2, eraseSafe.inkMode.inkSplit + ' fragments');
-  check('object mode still removes a whole page', eraseSafe.objectMode.pageGone);
+  check('whole-stroke mode leaves the page alone too',
+    eraseSafe.objectMode.pageKept && eraseSafe.objectMode.noteKept, JSON.stringify(eraseSafe.objectMode));
 
   /* ---- device roles: stylus inks, mouse pans ---- */
   const roles = await js(`
@@ -2284,6 +2348,634 @@ async function run(win, app) {
   check('you cannot pan away from the paper until it is off screen', padCam.paperStillOnScreen === true);
   check('an infinite board is still free to roam', padCam.infiniteStillFree === true);
 
+  /* ---- the bottom controls never sit on top of each other ---- *
+   * The toolbar is centred and the readouts are right-anchored, so they start
+   * to overlap long before the window looks narrow. This sweeps real window
+   * sizes rather than trusting a breakpoint, so adding a tool later cannot
+   * quietly push the pens back under the zoom control.
+   */
+  {
+    const [w0, h0] = win.getSize();
+    await js(`window.app.newBoard(true); await window.app.setPageSize('a4','portrait'); window.app.addPage();`);
+    const clashes = [];
+    for (const h of [1000, 800, 620, 520]) {
+      for (const w of [1700, 1440, 1340, 1310, 1200, 1050, 900, 861, 860, 700, 560, 470]) {
+        win.setSize(w, h);
+        await sleep(60);
+        const r = await js(`
+          window.app.surface.resize(true);
+          const R = (id) => { const e = document.getElementById(id); if (!e || e.hidden) return null; return e.getBoundingClientRect(); };
+          const hit = (a, b) => !!a && !!b && a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+          const tb = R('toolbar'), zb = R('zoombar'), pb = R('pagebar');
+          return { tz: hit(tb, zb), tp: hit(tb, pb), zp: hit(zb, pb),
+                   spills: !!tb && (tb.bottom > window.innerHeight + 1) };
+        `);
+        if (r.tz || r.tp || r.zp || r.spills) clashes.push(`${w}x${h}`);
+      }
+    }
+    win.setSize(w0, h0);
+    await sleep(120);
+    await js(`window.app.surface.resize(true); window.app.newBoard(true); window.app.store.clear();`);
+    check('the toolbar, zoom and page controls never overlap at any window size',
+      clashes.length === 0, clashes.slice(0, 6).join(', ') || 'clean at 48 sizes');
+
+    // and the readouts stay where people reach for them until the window is
+    // genuinely too narrow to keep them there
+    const corner = [];
+    for (const w of [1440, 1340, 1280, 1100, 950, 880]) {
+      win.setSize(w, 820);
+      await sleep(60);
+      const ok = await js(`
+        window.app.surface.resize(true);
+        const zb = document.getElementById('zoombar').getBoundingClientRect();
+        return (window.innerHeight - zb.bottom) < 40 && (window.innerWidth - zb.right) < 40;
+      `);
+      if (!ok) corner.push(String(w));
+    }
+    win.setSize(w0, h0);
+    await sleep(120);
+    await js(`window.app.surface.resize(true);`);
+    check('the zoom readout stays in the bottom-right corner on any usable window',
+      corner.length === 0, corner.join(', ') || 'corner down to 880px');
+  }
+
+  /* ---- shortcut letters on the toolbar ---- */
+  const keys = await js(`
+    const a = window.app;
+    const bar = document.getElementById('toolbar');
+    const r = {};
+    const badge = (sel) => { const el = bar.querySelector(sel); const k = el && el.querySelector('.kbd'); return k ? k.textContent : null; };
+    r.select = badge('[data-tool="select"]');
+    r.lasso  = badge('[data-tool="lasso"]');
+    r.laser  = badge('[data-tool="laser"]');
+    r.pen    = badge('.pen[data-pen="black"]');
+    r.red    = badge('.pen[data-pen="red"]');
+    r.galaxy = badge('.pen[data-pen="galaxy"]');
+    r.hl     = badge('.pen[data-tool="highlighter"]');
+    r.eraser = badge('.pen[data-tool="eraser"]');
+    r.text   = badge('[data-tool="text"]');
+    r.note   = badge('[data-tool="note"]');
+    r.shape  = badge('[data-tool="shape"]');
+    // only the canonical pen carries the letter, not all six colours
+    r.pensWithKeys = bar.querySelectorAll('.pen[data-pen] .kbd').length;
+
+    // the digits actually reach the pens
+    const { PENS } = await import('app://board/js/ui/palettes.js');
+    const press = (k) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+    a.setTool('select');
+    press('3');
+    r.afterThree = { tool: a.tool, color: a.settings.penColor, want: PENS[2].color };
+    press('5');
+    r.afterFive = { tool: a.tool, effect: a.settings.penEffect, want: PENS[4].effect };
+    press('9');                       // there is no ninth pen
+    r.ninthIgnored = a.settings.penColor === PENS[4].color;
+
+    // recolouring the highlighter must not drop its badge
+    a.settings.highlighterColor = '#00ff00';
+    a.syncUI();
+    r.hlAfterRecolour = badge('.pen[data-tool="highlighter"]');
+
+    // and the letters can be turned off
+    a.settings.showToolKeys = false; a.syncUI();
+    r.hiddenClass = bar.classList.contains('hide-keys');
+    a.settings.showToolKeys = true; a.syncUI();
+    r.shownAgain = !bar.classList.contains('hide-keys');
+    return r;
+  `);
+  check('every tool with a shortcut shows its letter',
+    keys.select === 'V' && keys.lasso === 'L' && keys.laser === 'X'
+      && keys.hl === 'H' && keys.eraser === 'E' && keys.text === 'T' && keys.note === 'N' && keys.shape === 'S',
+    JSON.stringify(keys));
+  check('each pen wears its own number', keys.pen === '1' && keys.red === '2' && keys.galaxy === '6'
+    && keys.pensWithKeys === 6, JSON.stringify(keys));
+  check('a digit switches straight to that pen',
+    keys.afterThree.tool === 'pen' && keys.afterThree.color === keys.afterThree.want,
+    JSON.stringify(keys.afterThree));
+  check('and it carries the pen\'s effect, not just its colour',
+    keys.afterFive.effect === keys.afterFive.want, JSON.stringify(keys.afterFive));
+  check('a digit past the end of the tray does nothing', keys.ninthIgnored === true);
+  check('recolouring the highlighter keeps its letter', keys.hlAfterRecolour === 'H');
+  check('the letters can be switched off', keys.hiddenClass === true && keys.shownAgain === true);
+
+  /* ---- deleting a board, and creating one ---- *
+   * Deleting the board you are looking at used to remove the file and leave
+   * the document in memory holding its id, so the next autosave wrote it
+   * straight back: the board returned the moment anything was drawn. And a new
+   * board was not written until the first mark, so it did not appear in the
+   * list when you made it.
+   */
+  const boardsLife = await js(`
+    const a = window.app;
+    const r = {};
+    const list = async () => (await window.board.boards.list()).map(b => b.id);
+
+    // --- an explicit New board is listed straight away, before anything is drawn
+    a.newBoard(false);
+    await a.pendingWrite;
+    const freshId = a.store.doc.id;
+    r.newBoardListedImmediately = (await list()).includes(freshId);
+    r.newBoardIsEmpty = a.store.objects.length === 0;
+
+    // --- but one the app makes for itself leaves no litter
+    a.newBoard(true);
+    await new Promise(res => setTimeout(res, 60));
+    r.silentBoardNotListed = !(await list()).includes(a.store.doc.id);
+
+    // --- delete the board that is open
+    a.newBoard(false);
+    await a.pendingWrite;
+    const doomed = a.store.doc.id;
+    a.store.add({ id: 'mark', type: 'shape', kind: 'rect', x: 0, y: 0, w: 40, h: 40,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 }, 'x');
+    await a.persist({ force: true });
+    r.wasOnDisk = (await list()).includes(doomed);
+
+    const wasOpen = await a.deleteBoard(doomed);
+    r.reportedOpen = wasOpen === true;
+    r.goneFromList = !(await list()).includes(doomed);
+    r.canvasCleared = a.store.objects.length === 0;
+    r.freshId = a.store.doc.id !== doomed;
+
+    // the resurrection: draw on the replacement and make sure the deleted one
+    // does not come back
+    a.store.add({ id: 'after', type: 'shape', kind: 'rect', x: 0, y: 0, w: 40, h: 40,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 }, 'x');
+    await a.persist({ force: true });
+    const after = await list();
+    r.stayedDeleted = !after.includes(doomed);
+    r.newOneSaved = after.includes(a.store.doc.id);
+
+    // --- deleting a board you are NOT looking at must not disturb the canvas
+    a.newBoard(false); await a.pendingWrite;
+    const other = a.store.doc.id;
+    a.newBoard(false); await a.pendingWrite;
+    const current = a.store.doc.id;
+    a.store.add({ id: 'keep', type: 'shape', kind: 'rect', x: 0, y: 0, w: 40, h: 40,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 }, 'x');
+    const openedWas = await a.deleteBoard(other);
+    r.otherReportedNotOpen = openedWas === false;
+    r.currentUntouched = a.store.doc.id === current && a.store.has('keep');
+
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  check('a new board appears in the list as soon as it is made',
+    boardsLife.newBoardListedImmediately === true && boardsLife.newBoardIsEmpty === true, JSON.stringify(boardsLife));
+  check('a board the app makes for itself still leaves no litter',
+    boardsLife.silentBoardNotListed === true);
+  check('deleting the open board clears the canvas and starts a fresh one',
+    boardsLife.wasOnDisk && boardsLife.reportedOpen && boardsLife.goneFromList
+      && boardsLife.canvasCleared && boardsLife.freshId, JSON.stringify(boardsLife));
+  check('a deleted board does not come back when you draw again',
+    boardsLife.stayedDeleted === true && boardsLife.newOneSaved === true, JSON.stringify(boardsLife));
+  check('deleting a different board leaves the open one alone',
+    boardsLife.otherReportedNotOpen === true && boardsLife.currentUntouched === true, JSON.stringify(boardsLife));
+
+  /* ---- panning for machines with no pen ---- *
+   * The pan tool is not new machinery: space-drag and the middle button have
+   * always used it. What is new is that it is visible. The assertions that
+   * matter here are the ones about what did NOT change.
+   */
+  const panning = await js(`
+    const a = window.app;
+    const sf = a.surface, inter = a.interaction, cam = sf.cam;
+    const r = {};
+    a.newBoard(true);
+
+    const bar = document.getElementById('toolbar');
+    const btn = bar.querySelector('[data-tool="pan"]');
+    r.hasButton = !!btn;
+    r.badge = btn && btn.querySelector('.kbd') ? btn.querySelector('.kbd').textContent : null;
+
+    // it drags the view and touches nothing in the document
+    a.setTool('pan');
+    r.toolSet = a.tool === 'pan';
+    a.store.add({ id: 'keep', type: 'shape', kind: 'rect', x: 0, y: 0, w: 50, h: 50,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 }, 'x');
+    const rev0 = a.store.rev, n0 = a.store.objects.length;
+    const c0 = { x: cam.x, y: cam.y };
+    inter.action = { type: 'pan', sp: { x: 100, y: 100 }, cam: { x: cam.x, y: cam.y } };
+    inter.applyMotion({ x: 180, y: 140 }, {}, null);
+    inter.action = null;
+    r.panned = Math.round(cam.x - c0.x) === 80 && Math.round(cam.y - c0.y) === 40;
+    r.docUntouched = a.store.rev === rev0 && a.store.objects.length === n0;
+
+    // choosing it does not throw away a selection
+    a.setTool('select');
+    a.setSelection(['keep']);
+    a.setTool('pan');
+    r.keptSelection = sf.selection.has('keep');
+
+    // ---- nothing that already worked may have changed ----
+    a.setTool('pen');
+    // With an ink tool active, a mouse is a pointer once a stylus has been
+    // seen, and a pen otherwise. That rule is older than any of this and must
+    // be exactly as it was, so assert the rule rather than one of its answers.
+    r.mouseInks = a.mouseInks;
+    r.mouseRuleHolds = inter.effectiveTool({ button: 0, pointerType: 'mouse' })
+      === (a.mouseInks ? 'pen' : 'mousePointer');
+    inter.spaceDown = true;
+    r.spaceOverrides = inter.effectiveTool({ button: 0, pointerType: 'mouse' }) === 'pan';
+    inter.spaceDown = false;
+    r.middleStillPans = inter.effectiveTool({ button: 1, pointerType: 'mouse' }) === 'pan';
+    r.penStillInks = inter.effectiveTool({ button: 0, pointerType: 'pen' }) === 'pen';
+    r.rightStillSelects = inter.effectiveTool({ button: 2, pointerType: 'mouse' }) === 'select';
+
+    // ---- right-drag ----
+    a.settings.rightDragPans = true;
+    const c1 = { x: cam.x, y: cam.y };
+    const down = { pointerId: 77, pointerType: 'mouse', button: 2, buttons: 2, clientX: 300, clientY: 300,
+                   isPrimary: true, preventDefault() {}, getCoalescedEvents: null };
+    inter.onDown(down);
+    r.rightPanStarted = !!inter.rightPan;
+    r.noActionStarted = inter.action === null;          // nothing that edits
+    // a tiny wobble is still a click, not a drag
+    inter.onMove({ ...down, clientX: 301, clientY: 301 });
+    r.wobbleIsNotADrag = inter.rightPan && inter.rightPan.moved === false;
+    inter.onMove({ ...down, clientX: 380, clientY: 350 });
+    r.rightDragMoved = Math.abs(cam.x - c1.x) > 40;
+    inter.onUp({ ...down, clientX: 380, clientY: 350 });
+    r.menuSwallowedAfterDrag = inter._eatNextMenu === true;
+    inter._eatNextMenu = false;
+
+    // a right CLICK that does not move must still open the menu
+    inter.onDown({ ...down, pointerId: 78 });
+    inter.onUp({ ...down, pointerId: 78 });
+    r.plainRightClickKeepsMenu = inter._eatNextMenu === false;
+
+    // and the whole thing can be switched off
+    a.settings.rightDragPans = false;
+    inter.onDown({ ...down, pointerId: 79 });
+    r.offMeansOff = inter.rightPan === null;
+    a.settings.rightDragPans = true;
+
+    inter.rightPan = null; inter.action = null;
+    a.setTool('pen'); a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  const hint = await js(`
+    const a = window.app;
+    const host = document.getElementById('hints');
+    const r = {};
+    a.settings.hintsSeen = {};
+    r.shown = a.showHint('t-one', 'Hello <b>there</b>', 60000);
+    r.inDom = host.querySelectorAll('.hint').length === 1;
+    r.topRight = (() => {
+      const b = host.getBoundingClientRect();
+      return b.top < 120 && (window.innerWidth - b.right) < 40;
+    })();
+    // a hint is one-off: asking again does nothing
+    r.secondTime = a.showHint('t-one', 'Hello again', 60000);
+    r.stillOne = host.querySelectorAll('.hint').length === 1;
+    // a different subject still gets its own
+    r.otherSubject = a.showHint('t-two', 'Another', 60000);
+    // it can be dismissed by hand
+    host.querySelector('.hint .hint-x').click();
+    await new Promise(res => setTimeout(res, 400));
+    r.afterDismiss = host.querySelectorAll('.hint').length;
+    // and it never blocks the canvas
+    r.hostIgnoresClicks = getComputedStyle(host).pointerEvents === 'none';
+    host.innerHTML = '';
+    a.settings.hintsSeen = {}; a.saveSettings();
+    return r;
+  `);
+  check('a first-run hint appears in the top-right corner',
+    hint.shown === true && hint.inDom === true && hint.topRight === true, JSON.stringify(hint));
+  check('a hint is shown once and never again',
+    hint.secondTime === false && hint.stillOne === true && hint.otherSubject === true, JSON.stringify(hint));
+  check('a hint can be dismissed and never covers the canvas',
+    hint.afterDismiss === 1 && hint.hostIgnoresClicks === true, JSON.stringify(hint));
+
+  check('there is a pan tool on the toolbar, with its key on it',
+    panning.hasButton && panning.badge === 'G', JSON.stringify(panning.badge));
+  check('the pan tool moves the view and touches nothing in the document',
+    panning.toolSet && panning.panned && panning.docUntouched, JSON.stringify(panning));
+  check('choosing pan does not throw away the selection', panning.keptSelection === true);
+  check('space, the middle button, the pen and right-click all behave exactly as before',
+    panning.mouseRuleHolds && panning.spaceOverrides && panning.middleStillPans
+      && panning.penStillInks && panning.rightStillSelects, JSON.stringify(panning));
+  check('a right-drag pans and starts no editing gesture',
+    panning.rightPanStarted && panning.noActionStarted && panning.rightDragMoved, JSON.stringify(panning));
+  check('a small wobble is still a click, not a drag', panning.wobbleIsNotADrag === true);
+  check('a right-drag swallows the menu, a plain right-click does not',
+    panning.menuSwallowedAfterDrag === true && panning.plainRightClickKeepsMenu === true, JSON.stringify(panning));
+  check('right-drag panning can be switched off', panning.offMeansOff === true);
+
+  /* ---- the update check ---- *
+   * The one network call in the app, so the parts that matter are: it never
+   * fires without consent, it compares versions correctly, and it cannot break
+   * the app when the network is not there.
+   */
+  const upd = await js(`
+    const { isNewer, parseVersion } = await import('app://board/js/core/version.js');
+    const a = window.app;
+    const r = {};
+    const t = (c, cur) => isNewer(c, cur);
+    r.newer      = t('2.1.0', '2.0.1') && t('1.18.0', '1.17.1') && t('v2.1.1', '2.1.0');
+    r.tenBeatsNine = t('2.10.0', '2.9.0') && !t('2.9.0', '2.10.0');
+    r.sameIsNot  = !t('2.1.0', '2.1.0');
+    r.olderIsNot = !t('2.0.1', '2.1.0');
+    r.releaseBeatsPre = t('2.1.0', '2.1.0-beta.1') && !t('2.1.0-beta.1', '2.1.0');
+    r.junkIsNot  = !t('garbage', '2.1.0') && !t('2.1', '2.0.0') && !t('', '2.0.0') && !t(null, '2.1.0') && !t('2.1.0', null);
+    r.buildMeta  = t('2.1.0+build9', '2.0.0');
+    r.parsed     = parseVersion('v2.10.3-rc.1');
+
+    // consent gates the call: with the question unanswered, nothing goes out
+    let calls = 0;
+    const real = window.board.checkForUpdate;
+    const spy = async () => { calls++; return { ok: false, error: 'stubbed' }; };
+    // window.board is frozen by contextBridge, so spy through the app instead
+    a.settings.updateCheck = null;
+    a.settings.lastUpdateCheck = 0;
+    const beforeUnanswered = calls;
+    await a.checkForUpdates({ silent: true });
+    r.silentWhenUnanswered = true;   // returns immediately; asserted by not throwing
+
+    a.settings.updateCheck = false;
+    r.refusedWhenOff = (await a.checkForUpdates({ silent: true })) === null;
+
+    // and the daily limit holds
+    a.settings.updateCheck = true;
+    a.settings.lastUpdateCheck = Date.now();
+    r.rateLimited = (await a.checkForUpdates({ silent: true })) === null;
+
+    // the suite must never be interrupted by the consent dialog
+    const info = await a.appInfo();
+    r.smokeFlag = info.smoke === true;
+    r.startFlowNoOp = (await a.startUpdateFlow()) === undefined;
+
+    a.settings.updateCheck = null; a.settings.lastUpdateCheck = 0; a.saveSettings();
+    return r;
+  `);
+  // The whole chain against a real HTTP reply: fetch, parse, compare, decide.
+  // Served from localhost so it does not depend on the network, or on which
+  // version happens to be published today.
+  const http = require('node:http');
+  const fakeHub = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url.includes('broken')) { res.statusCode = 500; res.end('nope'); return; }
+    if (req.url.includes('garbage')) { res.end('{"not_a_release":true}'); return; }
+    res.end(JSON.stringify({ tag_name: 'v99.9.9', name: 'GazBoard v99.9.9', prerelease: false }));
+  });
+  await new Promise((r) => fakeHub.listen(0, '127.0.0.1', r));
+  const hubPort = fakeHub.address().port;
+  const hubUrl = (p = '') => `http://127.0.0.1:${hubPort}/${p}`;
+
+  const live = await js(`
+    const a = window.app;
+    const r = {};
+    const call = async () => await window.board.checkForUpdate();
+    r.ok = await (async () => { const x = await call(); return { ok: x.ok, version: x.version, url: x.url, prerelease: x.prerelease }; })();
+    return r;
+  `);
+  // point the handler at the stub for the calls above
+  process.env.GAZBOARD_UPDATE_API = hubUrl();
+  const served = await js(`
+    const x = await window.board.checkForUpdate();
+    return { ok: x.ok, version: x.version, url: x.url, prerelease: x.prerelease, error: x.error };
+  `);
+  process.env.GAZBOARD_UPDATE_API = hubUrl('broken');
+  const broke = await js(`return await window.board.checkForUpdate();`);
+  process.env.GAZBOARD_UPDATE_API = hubUrl('garbage');
+  const junk = await js(`return await window.board.checkForUpdate();`);
+  process.env.GAZBOARD_UPDATE_API = 'http://127.0.0.1:1/nothing-listening';
+  const dead = await js(`return await window.board.checkForUpdate();`);
+  delete process.env.GAZBOARD_UPDATE_API;
+  await new Promise((r) => fakeHub.close(r));
+
+  check('a real reply is fetched, parsed and turned into a version and a link',
+    served.ok === true && served.version === '99.9.9'
+      && served.url === 'https://github.com/fahim9778/GazBoard/releases/tag/v99.9.9'
+      && served.prerelease === false,
+    JSON.stringify(served));
+  check('a server error is reported, not thrown', broke.ok === false && !!broke.error, JSON.stringify(broke));
+  check('a reply that is not a release is refused', junk.ok === false, JSON.stringify(junk));
+  check('being offline is handled quietly', dead.ok === false && !!dead.error, JSON.stringify(dead));
+
+  const updUi = await js(`
+    const a = window.app;
+    const r = {};
+    // the ⋯ menu
+    document.querySelector('#toolbar [data-cmd="more"]').click();
+    await new Promise(res => setTimeout(res, 120));
+    const items = [...document.querySelectorAll('.menu .menu-item')].map(b => b.textContent.trim());
+    r.inMoreMenu = items.some(t => t.startsWith('Check for updates'));
+    r.notLeadingTheMenu = !items[0].startsWith('Check for updates');
+    r.hasAbout = items.some(t => t.startsWith('About GazBoard'));
+    document.body.click();
+    await new Promise(res => setTimeout(res, 120));
+
+    // and the About box, next to the version
+    await a.showAbout();
+    await new Promise(res => setTimeout(res, 150));
+    const card = document.getElementById('overlayCard');
+    r.aboutShowsVersion = /GazBoard \\d+\\.\\d+\\.\\d+/.test(card.textContent);
+    const btns = [...card.querySelectorAll('.actions .btn')].map(b => b.textContent.trim());
+    r.aboutButtons = btns;
+    r.aboutHasCheck = btns.includes('Check for updates');
+    document.getElementById('overlay').classList.remove('show');
+
+    // the shortcuts dialog must be untouched by all this
+    a.showShortcuts();
+    await new Promise(res => setTimeout(res, 150));
+    r.shortcutButtons = [...document.getElementById('overlayCard').querySelectorAll('.actions .btn')].map(b => b.textContent.trim());
+    document.getElementById('overlay').classList.remove('show');
+    return r;
+  `);
+  check('Check for updates is in the ⋯ menu, and not hogging the top of it',
+    updUi.inMoreMenu === true && updUi.notLeadingTheMenu === true && updUi.hasAbout === true, JSON.stringify(updUi));
+  check('and there is a button for it in About, beside the version',
+    updUi.aboutHasCheck === true && updUi.aboutShowsVersion === true, JSON.stringify(updUi.aboutButtons));
+  check('the keyboard-shortcuts dialog still has only its Close button',
+    updUi.shortcutButtons.length === 1 && updUi.shortcutButtons[0] === 'Close', JSON.stringify(updUi.shortcutButtons));
+
+  const consent = await js(`
+    const a = window.app;
+    const r = {};
+    const overlay = document.getElementById('overlay');
+    const card = document.getElementById('overlayCard');
+
+    // the consent question offers only real answers - no third button that
+    // means neither
+    a.settings.updateCheck = null;
+    const p1 = a.askAboutUpdates();
+    await new Promise(res => setTimeout(res, 120));
+    r.buttons = [...card.querySelectorAll('.actions .btn')].map(b => b.textContent.trim());
+    r.noCancelButton = !r.buttons.includes('Cancel');
+    // escaping is "ask me later", not "no"
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await p1;
+    r.afterEscape = a.settings.updateCheck;
+    r.escapeLeavesUnanswered = a.settings.updateCheck === null;
+
+    // saying no is remembered
+    const p2 = a.askAboutUpdates();
+    await new Promise(res => setTimeout(res, 120));
+    [...card.querySelectorAll('.actions .btn')].find(b => b.textContent.includes('No')).click();
+    await p2;
+    r.noIsRemembered = a.settings.updateCheck === false;
+
+    // and it is not asked again once answered
+    const p3 = a.askAboutUpdates();
+    await p3;
+    r.notAskedAgain = !overlay.classList.contains('show');
+
+    // a dialog that still wants Cancel keeps it
+    const p4 = a.choose('t', 't', [{ id: 'a', label: 'A' }]);
+    await new Promise(res => setTimeout(res, 100));
+    r.otherDialogsKeepCancel = [...card.querySelectorAll('.actions .btn')].some(b => b.textContent.trim() === 'Cancel');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await p4;
+
+    a.settings.updateCheck = null; a.saveSettings();
+    overlay.classList.remove('show');
+    return r;
+  `);
+  check('the update question asks only what it means to ask',
+    consent.noCancelButton === true && consent.buttons.length === 2, JSON.stringify(consent.buttons));
+  check('escaping the question leaves it unanswered rather than recording a no',
+    consent.escapeLeavesUnanswered === true, JSON.stringify(consent.afterEscape));
+  check('an actual no is remembered, and it stops asking',
+    consent.noIsRemembered === true && consent.notAskedAgain === true, JSON.stringify(consent));
+  check('dialogs that need a Cancel button still have one', consent.otherDialogsKeepCancel === true);
+
+  check('a newer version is recognised', upd.newer === true, JSON.stringify(upd));
+  check('2.10.0 is newer than 2.9.0, not older', upd.tenBeatsNine === true);
+  check('the same or an older version is not an update', upd.sameIsNot && upd.olderIsNot);
+  check('a release beats its prerelease, and never the other way', upd.releaseBeatsPre === true);
+  check('an unparseable version is never treated as an update', upd.junkIsNot === true, JSON.stringify(upd));
+  check('build metadata does not confuse the comparison', upd.buildMeta === true);
+  check('the update check does nothing until it has been allowed',
+    upd.refusedWhenOff === true, JSON.stringify(upd));
+  check('and not more than once a day', upd.rateLimited === true);
+  check('the suite is never interrupted by the consent question',
+    upd.smokeFlag === true && upd.startFlowNoOp === true, JSON.stringify(upd));
+
+  /* ---- imported images are checked against their magic bytes ---- *
+   * From PR #1 by @anupamme. The contribution added the sniffer; this checks
+   * it against real headers AND that it is actually consulted on the import
+   * path, which is the part that makes it do anything.
+   */
+  const sniff = await js(`
+    const { looksLikeImageForTest: ok } = await import('app://board/js/insert.js');
+    const bytes = (...a) => new Uint8Array(a).buffer;
+    const text = (str) => new TextEncoder().encode(str).buffer;
+    const r = {};
+    r.png      = ok(bytes(0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A), 'png');
+    r.jpeg     = ok(bytes(0xFF,0xD8,0xFF,0xE0), 'jpg');
+    r.gif      = ok(bytes(0x47,0x49,0x46,0x38,0x39,0x61), 'gif');
+    r.bmp      = ok(bytes(0x42,0x4D,0x36,0x00), 'bmp');
+    r.webp     = ok(bytes(0x52,0x49,0x46,0x46,0,0,0,0,0x57,0x45,0x42,0x50), 'webp');
+    r.svg      = ok(text('<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>'), 'svg');
+    r.svgBare  = ok(text('  <svg viewBox="0 0 1 1"/>'), 'svg');
+    // an executable renamed to .png
+    r.exeAsPng = ok(bytes(0x4D,0x5A,0x90,0x00), 'png');
+    // a PNG renamed to .jpg - the wrong header for the extension it claims
+    r.pngAsJpg = ok(bytes(0x89,0x50,0x4E,0x47), 'jpg');
+    // a .wav is a RIFF container too, but it is not a WebP
+    r.wavAsWebp = ok(bytes(0x52,0x49,0x46,0x46,0,0,0,0,0x57,0x41,0x56,0x45), 'webp');
+    r.htmlAsSvg = ok(text('<html><script>alert(1)</script></html>'), 'svg');
+    r.emptyPng = ok(new Uint8Array(0).buffer, 'png');
+    return r;
+  `);
+  check('real image headers are accepted',
+    sniff.png && sniff.jpeg && sniff.gif && sniff.bmp && sniff.webp && sniff.svg && sniff.svgBare,
+    JSON.stringify(sniff));
+  check('a file that is not what its extension claims is refused',
+    sniff.exeAsPng === false && sniff.pngAsJpg === false && sniff.htmlAsSvg === false && sniff.emptyPng === false,
+    JSON.stringify(sniff));
+  check('a RIFF container that is not a WebP is refused', sniff.wavAsWebp === false);
+
+  // Real files on disk, through the real import path. window.board is handed
+  // over by contextBridge and is frozen, so there is nothing to stub - which
+  // is just as well, because stubbing it would not have proved anything.
+  const goodPng = path.join(OUT, 'sniff-good.png');
+  const evilPng = path.join(OUT, 'sniff-evil.png');
+  await fs.writeFile(goodPng, Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'));                                   // a real 1x1 PNG
+  await fs.writeFile(evilPng, Buffer.from('MZ\x90\x00\x03 this is an executable, not a picture'));
+
+  const sniffUsed = await js(`
+    const a = window.app;
+    const { insertImagesFromPaths } = await import('app://board/js/insert.js');
+    a.newBoard(true);
+    let toast = null;
+    const realToast = a.toast.bind(a);
+    a.toast = (m, ...rest) => { toast = m; return realToast(m, ...rest); };
+    const before = a.store.objects.length;
+    await insertImagesFromPaths(a, [${JSON.stringify(goodPng)}, ${JSON.stringify(evilPng)}]);
+    const r = { added: a.store.objects.length - before, toast,
+                namedTheFile: !!toast && toast.includes('sniff-evil.png') };
+    a.toast = realToast;
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  check('the check is actually consulted when importing, not just defined',
+    sniffUsed.added === 1, `${sniffUsed.added} of 2 files imported`);
+  check('and a skipped file is named rather than dropped silently',
+    sniffUsed.namedTheFile === true, JSON.stringify(sniffUsed.toast));
+
+  /* ---- the laser pointer ---- */
+  const laser = await js(`
+    const a = window.app;
+    const r = {};
+    a.newBoard(true);
+    const sf = a.surface, inter = a.interaction, cam = sf.cam;
+
+    a.setTool('laser');
+    r.toolSet = a.tool === 'laser';
+    const before = a.store.objects.length;
+    const revBefore = a.store.rev;
+
+    const scr = (w) => ({ x: w.x * cam.z + cam.x, y: w.y * cam.z + cam.y });
+    inter.onDown({ pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1,
+                   clientX: 0, clientY: 0, isPrimary: true,
+                   preventDefault(){}, getCoalescedEvents: null });
+    // drive the gesture through the real motion path
+    inter.action = { type: 'laser' };
+    sf.laser = [{ x: 0, y: 0, t: performance.now() }];
+    for (let i = 1; i <= 30; i++) inter.applyMotion(scr({ x: i * 12, y: i * 4 }), {}, null);
+    r.trailGrew = sf.laser.length > 5;
+
+    // nothing about the document may have moved
+    r.noObjects = a.store.objects.length === before;
+    r.noRevBump = a.store.rev === revBefore;
+    r.noUndo = a.store.canUndo === false;
+
+    // it fades on its own without another pointer event
+    const wasLength = sf.laser.length;
+    sf.laser.forEach((p, i) => { p.t = performance.now() - 2000; });
+    sf.pruneLaser();
+    r.fadedAway = sf.laser.length === 0 && wasLength > 0;
+
+    // and it is not part of an export
+    sf.laser = [{ x: 0, y: 0, t: performance.now() }, { x: 40, y: 40, t: performance.now() }];
+    a.store.add({ id: 'mark', type: 'shape', kind: 'rect', x: 0, y: 0, w: 60, h: 60,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 }, 'x');
+    const { exportBoundsForTest } = await import('app://board/js/export.js');
+    const box = exportBoundsForTest(a);
+    const c1 = sf.renderTo(box, 1, true).toDataURL('image/png');
+    sf.laser = [];
+    const c2 = sf.renderTo(box, 1, true).toDataURL('image/png');
+    r.exportIgnoresLaser = c1 === c2;
+
+    // switching tools clears any dot left on screen
+    sf.laser = [{ x: 0, y: 0, t: performance.now() }];
+    a.setTool('pen');
+    r.clearedOnToolChange = sf.laser.length === 0;
+
+    inter.action = null;
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  check('the laser tool leaves a trail', laser.toolSet && laser.trailGrew, JSON.stringify(laser));
+  check('the laser never touches the document',
+    laser.noObjects && laser.noRevBump && laser.noUndo, JSON.stringify(laser));
+  check('the trail fades by itself', laser.fadedAway === true);
+  check('exports do not contain the laser', laser.exportIgnoresLaser === true);
+  check('switching tools clears the laser', laser.clearedOnToolChange === true);
+
   /* ---- writing on imported pages stays cheap ---- *
    * Every pointer move used to repaint the whole board, page bitmaps and all.
    * With a document imported across many sheets that is a lot of redrawing for
@@ -2499,7 +3191,7 @@ async function run(win, app) {
   const about = await js(`const c = document.getElementById('overlayCard');
     return { title: c.querySelector('h3').textContent, html: c.innerHTML };`);
   check('About names the app GazBoard', /^GazBoard \d+\.\d+\.\d+$/.test(about.title.trim()), about.title);
-  check('About carries the theBoringCode brand', about.html.includes('theBoringCode'));
+  check('About carries the theBoringCodes brand', about.html.includes('theBoringCodes'));
   check('About credits the developer and a way to reach him',
     about.html.includes('MD. Fakhruddin Gazzali') && about.html.includes('mailto:fahim9778@gmail.com'));
   check('About says how it was built', about.html.includes('Claude Cowork'));

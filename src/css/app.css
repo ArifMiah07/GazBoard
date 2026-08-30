@@ -67,6 +67,21 @@ input, textarea { font: inherit; }
   max-width: calc(100vw - 24px); flex-wrap: nowrap; overflow: visible;
 }
 
+/* The keyboard letter on a tool button. Small, quiet, and out of the way of
+   the colour dot in the opposite corner - it is there to be found when you
+   look for it, not to compete with the icon. */
+.kbd {
+  position: absolute; left: 4px; bottom: 3px;
+  font-size: 10px; line-height: 1; font-weight: 700; letter-spacing: .2px;
+  color: var(--text-2); opacity: .78; pointer-events: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.tool.active .kbd, .pen.active .kbd { color: var(--accent); opacity: 1; }
+.tool:hover .kbd, .pen:hover .kbd { opacity: 1; }
+/* the pen bodies are dark, so their letter sits just outside the barrel */
+.pen .kbd { left: 2px; bottom: 1px; }
+#toolbar.hide-keys .kbd { display: none; }
+
 /* plain icon buttons */
 .tool {
   position: relative; width: 40px; height: 40px; border-radius: 8px; margin-bottom: 4px;
@@ -181,6 +196,30 @@ input, textarea { font: inherit; }
 #zoombar button { width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--text-2); }
 #zoombar button:hover { background: var(--surface-2); }
 #zoomLabel { min-width: 52px; text-align: center; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+
+/* ---------------- first-run hints ---------------- *
+   Top right, under the title bar, out of the way of both the toolbar and the
+   readouts. Says its piece once and then never again. */
+#hints {
+  position: absolute; top: 14px; right: 16px; z-index: 28;
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+  pointer-events: none; max-width: min(360px, 70vw);
+}
+.hint {
+  pointer-events: auto; display: flex; align-items: flex-start; gap: 10px;
+  background: var(--surface); border: 1px solid var(--stroke); border-radius: 10px;
+  box-shadow: var(--shadow-2); padding: 11px 12px 11px 13px;
+  font-size: 12.5px; line-height: 1.5; color: var(--text-2);
+  animation: hintIn .22s ease both;
+}
+.hint b { color: var(--text); font-weight: 600; }
+.hint .hint-x {
+  flex: 0 0 auto; width: 20px; height: 20px; border-radius: 5px; margin: -2px -3px 0 0;
+  display: grid; place-items: center; color: var(--text-2); opacity: .6;
+}
+.hint .hint-x:hover { background: var(--surface-2); opacity: 1; }
+.hint.go { opacity: 0; transform: translateY(-6px); transition: opacity .3s, transform .3s; }
+@keyframes hintIn { from { opacity: 0; transform: translateY(-8px); } }
 
 /* ---------------- page navigator (pads only) ---------------- */
 #pagebar {
@@ -312,3 +351,81 @@ kbd {
   box-shadow: inset 0 0 0 1px var(--stroke-2);
 }
 .pick-tile.on .pick-check { background: var(--accent-2); color: #fff; box-shadow: none; }
+
+/* ================================================================= *
+ *  Narrow and short windows
+ *
+ *  The zoom and page readouts belong in the bottom-right corner - that is
+ *  where people reach for them, and moving them is more disruptive than the
+ *  overlap they were moved to avoid.
+ *
+ *  The toolbar is a centred row about 825px wide; the readouts are about
+ *  230px. Centred against right-anchored, they start to collide at roughly
+ *  1310px. So instead of lifting the readouts, the toolbar stops centring on
+ *  the window and centres on the space to the LEFT of them. It shifts a
+ *  little left of true centre, and it never reaches the corner.
+ *
+ *  Only when the window is too narrow for even that (under 860px) does the
+ *  toolbar take the full width and the readouts step up out of its way.
+ *
+ *  The test suite sweeps real window sizes and asserts that no two of the
+ *  three ever intersect, so adding a tool later cannot quietly bring the
+ *  overlap back.
+ * ================================================================= */
+@media (max-width: 1340px) {
+  #toolbar {
+    left: 12px; right: 252px;
+    transform: none;
+    width: max-content;
+    margin: 0 auto;                            /* centre in what is left */
+    max-width: calc(100vw - 276px);
+  }
+}
+
+@media (max-width: 1080px) {
+  .tb-btn span { display: none; }              /* icons still say what they do */
+  .tb-btn { padding: 0 8px; }
+  #boardTitle { max-width: 30vw; }
+}
+
+@media (max-width: 860px) {
+  /* no room to sit beside the readouts any more: take the width and let them
+     step up instead */
+  #toolbar {
+    left: 8px; right: 8px;
+    max-width: none;
+    overflow-x: auto; overflow-y: visible;
+    scrollbar-width: thin;
+    justify-content: flex-start;
+    padding-top: 12px;                         /* a lifted pen must not be clipped */
+  }
+  #toolbar::-webkit-scrollbar { height: 6px; }
+  #toolbar::-webkit-scrollbar-thumb { background: var(--stroke); border-radius: 3px; }
+  .tool { width: 36px; height: 36px; }
+  .pen { flex: 0 0 auto; }
+  #zoombar { right: 8px; bottom: 98px; }
+  #pagebar { right: 8px; bottom: 146px; }
+  .panel { width: min(340px, 92vw); }
+}
+
+@media (max-width: 620px) {
+  #zoombar [data-cmd="zoomIn"], #zoombar [data-cmd="zoomOut"] { display: none; }
+  #toasts { max-width: 92vw; }
+}
+
+/* A snapped window is often short as well as narrow. */
+@media (max-height: 620px) {
+  #toolbar { bottom: 8px; }
+}
+
+@media (max-width: 860px) and (max-height: 620px) {
+  #zoombar { bottom: 92px; }
+  #pagebar { bottom: 140px; }
+}
+
+/* Very short and narrow: nothing stacks, so the readouts go to the top right
+   and leave the bottom entirely to the pens. */
+@media (max-width: 860px) and (max-height: 460px) {
+  #zoombar { top: 8px; bottom: auto; }
+  #pagebar { top: 52px; bottom: auto; }
+}

@@ -10,6 +10,14 @@ const { pathToFileURL } = require('node:url');
 const SRC = path.join(__dirname, 'src');
 const isDev = process.argv.includes('--dev');
 
+// The one place the app knows about the internet, and it only looks.
+const RELEASES_URL = 'https://github.com/fahim9778/GazBoard/releases';
+// Overridable so the suite can serve a known reply from localhost and test the
+// whole chain - fetch, parse, compare, decide - without depending on the
+// network or on what happens to be released today.
+const UPDATE_API = process.env.GAZBOARD_UPDATE_API
+  || 'https://api.github.com/repos/fahim9778/GazBoard/releases/latest';
+
 // Smoke runs use a throwaway profile so tests never see (or clobber) real boards.
 // GAZBOARD_USER_DATA points the whole profile somewhere else and is kept between
 // runs - the restart tests need two launches to share one profile, and it doubles
@@ -182,7 +190,11 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: saved?.width ?? 1440, height: saved?.height ?? 900,
     x: saved?.x, y: saved?.y,
-    minWidth: 900, minHeight: 600,
+    // Small enough to snap beside another window. Windows Snap works in
+    // LOGICAL pixels, so on a 1920-wide screen at 150% scaling half the desktop
+    // is only 640 logical px - a 900px minimum silently refuses to fit there and
+    // the window ends up overlapping whatever it was meant to sit next to.
+    minWidth: 460, minHeight: 480,
     backgroundColor: '#f3f2f1',
     title: 'GazBoard',
     show: false,
@@ -431,7 +443,10 @@ function ipc() {
   ipcMain.handle('app:info', () => ({
     version: app.getVersion(), platform: process.platform,
     electron: process.versions.electron, chrome: process.versions.chrome,
-    libreoffice: !!findSoffice(), userData: app.getPath('userData')
+    libreoffice: !!findSoffice(), userData: app.getPath('userData'),
+    // the suite drives the app headlessly; it must never be stopped by a
+    // consent dialog, and it must never reach the network
+    smoke: process.argv.includes('--smoke')
   }));
 
   ipcMain.handle('fs:readFile', async (_e, p) => { const b = await fsp.readFile(p); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); });
@@ -452,6 +467,48 @@ function ipc() {
   });
 
   ipcMain.handle('shell:showItem', (_e, p) => { shell.showItemInFolder(p); });
+  ipcMain.handle('shell:openExternal', async (_e, url) => {
+    // only ever our own releases page - never an arbitrary URL from the board
+    if (typeof url !== 'string' || !url.startsWith(RELEASES_URL)) return false;
+    await shell.openExternal(url);
+    return true;
+  });
+
+  /**
+   * Ask GitHub what the newest release is.
+   *
+   * The only network call the app ever makes, and it happens solely because
+   * the user said yes to it. Nothing is sent: no board data, no identifier,
+   * not even a query string - it is a plain GET of a public endpoint, and
+   * GitHub sees what any web request shows it. The answer is a version string
+   * and a URL; deciding what to do with them belongs to the renderer.
+   */
+  ipcMain.handle('updates:check', async () => {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    try {
+      const endpoint = process.env.GAZBOARD_UPDATE_API || UPDATE_API;
+      const res = await net.fetch(endpoint, {
+        signal: ctl.signal,
+        headers: { 'User-Agent': `GazBoard/${app.getVersion()}`, Accept: 'application/vnd.github+json' }
+      });
+      if (!res.ok) return { ok: false, error: `GitHub replied ${res.status}` };
+      const j = await res.json();
+      if (!j || typeof j.tag_name !== 'string') return { ok: false, error: 'Unexpected reply from GitHub' };
+      return {
+        ok: true,
+        version: j.tag_name.replace(/^v/i, ''),
+        name: typeof j.name === 'string' ? j.name : j.tag_name,
+        url: RELEASES_URL + '/tag/' + encodeURIComponent(j.tag_name),
+        prerelease: !!j.prerelease
+      };
+    } catch (e) {
+      // offline, blocked, rate-limited or timed out - all the same to the caller
+      return { ok: false, error: e.name === 'AbortError' ? 'The check timed out' : 'No connection' };
+    } finally {
+      clearTimeout(timer);
+    }
+  });
 
   /* --- board persistence --- */
   ipcMain.handle('boards:list', async () => {
@@ -518,7 +575,13 @@ function ipc() {
     return { board: null, reason: 'none' };
   });
   ipcMain.handle('boards:delete', async (_e, id) => {
-    try { await fsp.unlink(path.join(dataDir(), id + '.json')); return true; } catch { return false; }
+    let ok = false;
+    try { await fsp.unlink(path.join(dataDir(), id + '.json')); ok = true; } catch { ok = false; }
+    // The "last open" pointer must not go on naming a board that no longer
+    // exists, or the next launch spends its first moments trying to open a
+    // deleted file before falling back.
+    try { if (await getLastBoard() === id) await setLastBoard(null); } catch {}
+    return ok;
   });
 
   /* --- document import: anything -> PDF bytes --- */

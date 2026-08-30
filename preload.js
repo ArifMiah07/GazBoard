@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('board', {
   openDialog: (opts) => ipcRenderer.invoke('dialog:open', opts),
   saveDialog: (opts) => ipcRenderer.invoke('dialog:save', opts),
   showItem: (p) => ipcRenderer.invoke('shell:showItem', p),
+  openReleases: (url) => ipcRenderer.invoke('shell:openExternal', url),
+  checkForUpdate: () => ipcRenderer.invoke('updates:check'),
 
   boards: {
     list: () => ipcRenderer.invoke('boards:list'),

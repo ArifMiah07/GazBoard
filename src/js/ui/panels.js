@@ -187,7 +187,7 @@ export function createPanels(app) {
 
       const info = h('div', { style: 'font-size:12px;color:var(--text-2);line-height:1.6' });
       window.board.info().then((i) => {
-        info.innerHTML = `<b style="color:var(--text)">GazBoard ${i.version}</b> · by <b style="color:var(--accent)">theBoringCode</b><br>` +
+        info.innerHTML = `<b style="color:var(--text)">GazBoard ${i.version}</b> · by <b style="color:var(--accent)">theBoringCodes</b><br>` +
           `MD. Fakhruddin Gazzali · <a href="mailto:fahim9778@gmail.com" target="_blank" style="color:var(--accent)">fahim9778@gmail.com</a><br>` +
           `Created with <span style="color:#e81123">&hearts;</span> with Claude Cowork<br>` +
           `Electron ${i.electron} · Chromium ${i.chrome}<br>` +
@@ -220,6 +220,12 @@ export function createPanels(app) {
           row('Auto-pan at the edges', mkToggle(() => s.edgePan, (v) => (s.edgePan = v)),
             'While drawing or dragging, running the pointer into the edge of the window scrolls the canvas. A mouse button held down during a pen stroke drags the canvas too.'),
           row('Return to select after drawing', mkToggle(() => s.returnToSelect, (v) => (s.returnToSelect = v))),
+          row('Right-drag pans the canvas', mkToggle(() => s.rightDragPans !== false, (v) => (s.rightDragPans = v)),
+            'Hold the right mouse button and drag to move around — useful on a laptop with no pen and no middle button. A right click that does not move still opens the usual menu.'),
+          row('Check for updates', mkToggle(() => s.updateCheck === true, (v) => { s.updateCheck = v; app.saveSettings(); if (v) app.checkForUpdates({ force: true }); }),
+            'Asks GitHub once a day whether a newer version exists, and tells you if so. Nothing is downloaded or installed automatically, and nothing about you or your boards is ever sent. Off means the app never touches the network.'),
+          row('Shortcut letters on the toolbar', mkToggle(() => s.showToolKeys !== false, (v) => (s.showToolKeys = v)),
+            'Shows the key for each tool in the corner of its button — V, P, H, E and so on — so you can switch without stopping to look them up.'),
           row('Low-latency inking', mkToggle(() => s.lowLatencyInk, (v) => { s.lowLatencyInk = v; app.toast('Takes effect next time GazBoard opens'); }),
             'Shaves a little lag off the pen by letting the canvas skip a buffering step. On some graphics drivers this makes the board flicker while you write or drag, especially with imported document pages on it — leave it off if you see that. Applies when the app is reopened.'),
           row('Autosave', mkToggle(() => s.autosave, (v) => (s.autosave = v)), 'Boards are stored locally on this computer.')
@@ -263,7 +269,7 @@ export function createPanels(app) {
         h('span', { class: 'meta' },
           h('b', {}, b.name || 'Untitled board'),
           h('small', {}, `${b.objects} item${b.objects === 1 ? '' : 's'} · ${new Date(b.modified).toLocaleString()}`)),
-        h('span', { class: 'icon-btn', title: 'Delete', html: icon('trash', 16), onclick: async (e) => { e.stopPropagation(); if (await app.confirm('Delete board?', `"${b.name}" will be permanently removed.`, 'Delete')) { await window.board.boards.remove(b.id); boards(); } } })
+        h('span', { class: 'icon-btn', title: 'Delete', html: icon('trash', 16), onclick: async (e) => { e.stopPropagation(); if (await app.confirm('Delete board?', `"${b.name}" will be permanently removed.`, 'Delete')) { await app.deleteBoard(b.id); boards(); } } })
       );
       row.addEventListener('click', async () => {
         const data = await window.board.boards.load(b.id);

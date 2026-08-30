@@ -1,7 +1,7 @@
 {
   "name": "gazboard",
   "productName": "GazBoard",
-  "version": "2.0.1",
+  "version": "2.3.0",
   "description": "A free-form digital whiteboard - offline replica of the classic Microsoft Whiteboard 21.x experience, with Word / PowerPoint / PDF import.",
   "main": "main.js",
   "scripts": {
@@ -13,10 +13,11 @@
     "dist": "electron-builder",
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",
-    "dist:linux": "electron-builder --linux"
+    "dist:linux": "electron-builder --linux",
+    "smoke:mac": "electron . --smoke"
   },
   "author": {
-    "name": "theBoringCode",
+    "name": "theBoringCodes",
     "email": "fahim9778@gmail.com"
   },
   "homepage": "https://github.com/fahim9778/GazBoard",
@@ -54,18 +55,36 @@
         "portable"
       ],
       "icon": "src/assets/icon.ico",
-      "legalTrademarks": "theBoringCode",
+      "legalTrademarks": "theBoringCodes",
       "signtoolOptions": {
-        "publisherName": "theBoringCode"
+        "publisherName": "theBoringCodes"
       }
     },
     "mac": {
       "target": [
-        "dmg",
-        "zip"
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
       "category": "public.app-category.productivity",
-      "icon": "src/assets/icon.png"
+      "icon": "src/assets/icon.icns",
+      "identity": null,
+      "darkModeSupport": true,
+      "extendInfo": {
+        "NSHighResolutionCapable": true,
+        "LSMinimumSystemVersion": "11.0"
+      }
     },
     "linux": {
       "target": [
@@ -76,7 +95,7 @@
       "icon": "src/assets/icon.png",
       "synopsis": "Offline whiteboard with Word / PowerPoint / PDF import",
       "description": "A free-form digital whiteboard for pen, sticky notes, shapes, text, images and documents. Runs entirely on your own computer - no account, no sign-in, no cloud.",
-      "maintainer": "theBoringCode <fahim9778@gmail.com>",
+      "maintainer": "theBoringCodes <fahim9778@gmail.com>",
       "desktop": {
         "entry": {
           "Name": "GazBoard",
@@ -114,7 +133,23 @@
         "icon": "src/assets/icon.ico"
       }
     ],
-    "publish": null
+    "publish": null,
+    "dmg": {
+      "title": "GazBoard ${version}",
+      "contents": [
+        {
+          "x": 140,
+          "y": 190,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    }
   },
   "desktopName": "gazboard.desktop"
 }

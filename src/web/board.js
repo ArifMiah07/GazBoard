@@ -16,9 +16,14 @@
   if (window.board) return;
   window.board = { web: true };
 
-  /* ---------------- lazy vendor loading ---------------- */
-  const vendor = (file) => new URL('../vendor/' + file, document.baseURI).href;
-  const mod = (file) => new URL('../web/' + file, document.baseURI).href;
+  /* ---------------- lazy vendor loading ----------------
+   * board.js is a classic script, so anchor asset URLs to its own location.
+   * document.baseURI is the *page* URL: fine at the domain root, but wrong
+   * when the app is served under a path (GitHub Pages /GazBoard/). */
+  const scriptUrl = document.currentScript && document.currentScript.src;
+  const BASE = scriptUrl ? new URL('.', scriptUrl) : document.baseURI;
+  const vendor = (file) => new URL('../vendor/' + file, BASE).href;
+  const mod = (file) => new URL('../web/' + file, BASE).href;
 
   function loadScript(url) {
     return new Promise((resolve, reject) => {

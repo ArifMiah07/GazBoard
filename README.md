@@ -6,13 +6,54 @@
 
 </div>
 
-A free-form digital whiteboard for Windows and Linux — an offline rebuild of the classic **Microsoft Whiteboard 21.x** experience, with one deliberate difference: **there is no Microsoft sign-in and no cloud.** 
+A free-form digital whiteboard for Windows, Linux and macOS — an offline rebuild of the classic **Microsoft Whiteboard 21.x** experience, with one deliberate difference: **there is no Microsoft sign-in and no cloud.** 
 
 Everything runs locally. On top of the original feature set it can **import Word, PowerPoint and PDF files** onto the canvas as pages you draw over.
 
-![Six pens, a highlighter, and pressure-sensitive ink with no smoothing](Screenshots/gazboardpens.png)
+<div align="center">
 
 [**Download the latest version**](https://github.com/fahim9778/GazBoard/releases/latest)
+
+</div>
+
+![Six pens, a highlighter, and pressure-sensitive ink with no smoothing](Screenshots/gazboardpens.png)
+
+
+---
+
+## Get it
+
+| Platform | File | How |
+|---|---|---|
+| **Windows 10 / 11** | `GazBoard-Setup-*.exe` | Run it. No admin rights needed. |
+| **macOS — Apple Silicon** | `GazBoard-*-arm64.dmg` | Open it, drag to Applications. See the note below. |
+| **macOS — Intel** | `GazBoard-*.dmg` | Open it, drag to Applications. See the note below. |
+| **Ubuntu / Debian** | `gazboard_*_amd64.deb` | `sudo apt install ./gazboard_*.deb` |
+| **Other Linux** | `GazBoard-*.AppImage` | `chmod +x` it and run it |
+
+Not sure which Mac you have? Apple menu →  About This Mac. **Apple M1/M2/M3/M4** means Apple Silicon; anything saying **Intel** takes the other file.
+
+### None of the downloads are code-signed, so each system might complain once, for the first-time only
+
+The app is the same on all three; signing certificates cost money that has not been spent yet.
+Every warning below is about the missing signature, not about the app.
+
+**Windows** shows a blue **“Windows protected your PC”** box — click **More info → Run anyway**.
+
+**macOS** refuses the first launch, and its wording is alarming: either *“the developer cannot be
+verified”* or ***“GazBoard is damaged and can’t be opened. You should move it to the Trash.”***
+Nothing is damaged. Open **System Settings → Privacy & Security**, scroll down, click
+**Open Anyway**, and confirm. macOS remembers, so this is once per install. If it still refuses,
+clear the download flag your browser attached:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/GazBoard.app
+```
+
+**Linux** does not complain at all. If the AppImage says it requires FUSE:
+`sudo apt install libfuse2`, or unpack it with `./GazBoard-*.AppImage --appimage-extract` and run
+`squashfs-root/gazboard`.
+
 ---
 
 ## Running it
@@ -290,6 +331,45 @@ Screenshots and a results file are written to `test/out/`.
 ![The MS Whiteboard–style pen tray toolbar](Screenshots/gazboardtoolbar.png)
 
 ![Multi Size Page Support](Screenshots/gazboardmultisizecanvas.png)
+
+---
+
+## macOS (Special Notes)
+
+GazBoard runs on macOS 11 and later, on both Apple Silicon and Intel. It is the same application —
+same boards, same file format, same everything.
+
+**Apple Silicon** takes `GazBoard-<version>-arm64.dmg`; **Intel** takes `GazBoard-<version>.dmg`.
+Apple menu →  About This Mac tells you which. The wrong one either will not run at all (arm64 on
+Intel) or will run slowly under Rosetta (Intel on Apple Silicon).
+
+### The first launch will be refused, and the message is misleading
+
+macOS will say either *"GazBoard cannot be opened because the developer cannot be verified"* or,
+more alarmingly, ***"GazBoard is damaged and can't be opened. You should move it to the Trash."***
+
+**Nothing is damaged.** macOS says that about any application not signed with an Apple developer
+certificate, which costs $99 a year and has not been bought while the Mac build is still finding
+out whether anyone wants it. The file is fine; macOS simply refuses to vouch for it.
+
+To open it:
+
+1. Open **System Settings → Privacy & Security**
+2. Scroll down to the line about GazBoard being blocked, and click **Open Anyway**
+3. Confirm once more
+
+macOS remembers the decision, so this is a first-launch-only step.
+
+If it still refuses with "damaged", the download-quarantine flag your browser attached is the
+culprit. Open Terminal and run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/GazBoard.app
+```
+
+The app is ad-hoc signed, which is what lets it run on Apple Silicon at all; what is missing is the
+Developer ID and Apple's notarisation. It is built from the same source as the Windows and Linux
+downloads, by the same automated workflow.
 
 ---
 ## Not included

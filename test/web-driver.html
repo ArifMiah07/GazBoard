@@ -1,0 +1,167 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>GazBoard web smoke</title>
+<!--
+Loads the real app in a hidden iframe and probes the window.board shim the
+same way an Electron smoke would. The driver writes a single id="smoke-result"
+element; test/web-smoke.js drives this page over CDP and waits for it.
+-->
+<body></body>
+<script>
+(function () {
+  const errs = [];
+  window.__dstep = 'start';
+  const setStep = (s) => { window.__dstep = s; };
+  window.addEventListener('error', (e) => errs.push('err:' + (e.message || e)));
+  window.addEventListener('unhandledrejection', (e) => errs.push('rej:' + (e.reason && e.reason.message || e.reason)));
+
+  const done = (pass, msgs) => {
+    if (document.getElementById('smoke-result')) return;
+    const el = document.createElement('div');
+    el.id = 'smoke-result';
+    el.textContent = (pass ? 'SMOKE PASS' : 'SMOKE FAIL') + ': ' + msgs.join(' | ');
+    document.body.appendChild(el);
+  };
+
+  const checks = [];
+  const guard = async (win, name, fn) => {
+    const m = (v) => checks.push(name + ':' + (v ? 'ok' : 'BAD'));
+    try { const v = await fn(win); m(v); if (!v) errs.push(name + ' failed'); }
+    catch (e) { checks.push(name + ':ERR'); errs.push(name + ': ' + ((e && e.message) || e)); }
+  };
+
+  const iframe = document.createElement('iframe');
+  setStep('make-iframe');
+  iframe.src = '/index.html';
+  iframe.style.cssText = 'position:fixed;left:-99999px;top:0;width:1440px;height:900px;border:0';
+  document.body.appendChild(iframe);
+  setStep('iframe-appended');
+
+  const boot = async () => {
+    setStep('boot-enter');
+    const IW = iframe.contentWindow;
+    if (!IW) throw new Error('iframe window unavailable');
+    setStep('boot-iw');
+
+    // catch errors raised inside the real app too
+    IW.addEventListener('error', (e) => errs.push('ifr-err:' + (e && e.message)));
+    IW.addEventListener('unhandledrejection', (e) => errs.push('ifr-rej:' + (e && e.reason && e.reason.message || e && e.reason)));
+
+    setStep('boot-start');
+    await new Promise((r) => { window.addEventListener('load', r, { once: true }); });
+    setStep('boot-loaded');
+    await new Promise((r) => setTimeout(r, 100));
+
+    await guard(IW, 'boot.app', async (w) => !!(w.app && w.board && w.board.web === true));
+    await guard(IW, 'boot.canvas', async (w) => {
+      const c = w.document.getElementById('c');
+      return !!c && c.width > 0 && c.height > 0;
+    });
+    await guard(IW, 'boot.menubar', async (w) => {
+      // The menubar counts as working only if a real dropdown opens on top of
+      // the canvas and an item reaches the command bus.
+      if (!w.document.getElementById('menubar')) return false;
+      const top = w.document.querySelector('#menubar .menu-top');
+      if (!top) return false;
+      top.click();
+      const drop = w.document.querySelector('.menu-drop');
+      if (!drop) return false;
+      const cs = w.getComputedStyle(drop);
+      if (cs.display !== 'flex' || cs.zIndex !== '1000') return false;
+      const r = drop.getBoundingClientRect();
+      const at = w.document.elementFromPoint(r.left + 32, r.top + 8);
+      if (!at || !at.closest('.menu-drop')) return false;
+      const orig = w.board.runMenu;
+      let got = null;
+      w.board.runMenu = (id) => { got = id; };
+      drop.querySelector('.mi').click();
+      w.board.runMenu = orig;
+      return got === 'board.new';
+    });
+
+    setStep('boards-start');
+    const doc = {
+      id: 'smoke-' + (Date.now() % 100000), name: 'Smoke board', schema: 2,
+      created: 1, modified: 1, background: { color: '#ffffff', pattern: 'none', patternColor: '#c8c6c4' },
+      pages: [], page: null, camera: { x: 0, y: 0, z: 1 }, objects: [], order: []
+    };
+
+    await guard(IW, 'boards.save', async (w) => { await w.board.boards.save(doc); return true; });
+    await guard(IW, 'boards.load', async (w) => { const d = await w.board.boards.load(doc.id); return !!(d && d.id === doc.id); });
+    await guard(IW, 'boards.list', async (w) => { const l = await w.board.boards.list(); return Array.isArray(l) && l.some((b) => b.id === doc.id); });
+    setStep('boards-done');
+    await guard(IW, 'boards.resume', async (w) => { const r = await w.board.boards.resume(); return !!(r && r.board); });
+
+    setStep('import-pdf-start');
+    await guard(IW, 'import.pdf', async (w) => {
+      // A minimal real PDF, built with pdf-lib and pushed through the same
+      // pdf.js pipeline the renderer uses (openPdf). Building the page size
+      // with the iframe's own Array matters: a cross-realm array literal fails
+      // `instanceof Array` inside pdf-lib's assertions.
+      await new Promise((res, rej) => {
+      const s = w.document.createElement('script');
+      s.src = '/vendor/pdf-lib.min.js';
+      s.onload = res; s.onerror = () => rej(new Error('pdf-lib load failed'));
+      w.document.head.appendChild(s);
+    });
+    if (!w.PDFLib) return false;
+    const pdfDoc = await w.PDFLib.PDFDocument.create();
+      const page = pdfDoc.addPage(new w.Array(200, 200));
+      page.drawText('GazBoard smoke', { x: 20, y: 100, size: 16 });
+      const bytes = await pdfDoc.save();
+      const f = new w.File([bytes], 'smoke.pdf', { type: 'application/pdf' });
+      const key = w.board.registerFile(f);
+      const res = await w.board.importToPdf(key);
+      if (!res || !res.ok || res.engine !== 'native') return false;
+      const u8 = new Uint8Array(res.data);
+      if (String.fromCharCode(u8[0], u8[1], u8[2], u8[3], u8[4]) !== '%PDF-') return false;
+      const { openPdf } = await import('/js/importers/pdf.js');
+      const doc = await openPdf(u8);
+      const valid = doc.numPages === 1;
+      await doc.destroy();
+      return valid;
+    });
+
+    setStep('import-start');
+    await guard(IW, 'import.txt', async (w) => {
+      const f = new w.File(['Hello GazBoard\nA second line.'], 'hello.txt', { type: 'text/plain' });
+      const key = w.board.registerFile(f);
+      const res = await w.board.importToPdf(key);
+      if (!res || !res.ok) return false;
+      const u8 = new Uint8Array(res.data);
+      return res.engine === 'builtin' && String.fromCharCode(u8[0], u8[1], u8[2], u8[3], u8[4]) === '%PDF-';
+    });
+
+    setStep('import-done');
+    await guard(IW, 'export.pdf', async (w) => {
+      const c = w.document.createElement('canvas');
+      c.width = 80; c.height = 60;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 80, 60);
+      ctx.fillStyle = '#0b6cff'; ctx.fillRect(10, 10, 40, 30);
+      const src = c.toDataURL('image/png');
+      const html = `<html><body><div class="sheet"><img src="${src}" style="width:40mm;height:30mm"></div></body></html>`;
+      const res = await w.board.exportPdf({ html, widthIn: 40 / 25.4, heightIn: 30 / 25.4 });
+      if (!res || !res.ok) return false;
+      const u8 = new Uint8Array(res.data);
+      return String.fromCharCode(u8[0], u8[1], u8[2], u8[3], u8[4]) === '%PDF-';
+    });
+
+    setStep('export-done');
+    // the app itself must not have thrown during boot
+    await guard(IW, 'boot.clean', async (w) => (w.__errors || []).length === 0);
+
+    const passed = checks.every((c) => c.endsWith(':ok'));
+    done(passed && errs.length === 0, Array.from(new Set([...checks, ...errs])));
+  };
+
+  boot().catch((e) => done(false, ['driver: ' + ((e && e.message) || e)]));
+
+  // watchdog: never leave the harness hanging
+  setTimeout(() => {
+    if (!document.getElementById('smoke-result')) {
+      done(false, ['watchdog fired at step ' + (window.__dstep || '?')]);
+    }
+  }, 45000);
+})();
+</script>

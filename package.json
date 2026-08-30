@@ -7,6 +7,8 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "web": "node serve.js",
+    "web:smoke": "node test/web-smoke.js",
     "smoke": "xvfb-run -a electron . --smoke --no-sandbox",
     "smoke:builtin": "GAZBOARD_DISABLE_LIBREOFFICE=1 xvfb-run -a electron . --smoke --no-sandbox",
     "test:restart": "sh test/restart-test.sh",
@@ -29,6 +31,10 @@
     {
       "name": "MD. Fakhruddin Gazzali",
       "email": "fahim9778@gmail.com"
+    },
+    {
+      "name": "Arif Miah",
+      "email": "155251439+ArifMiah07@users.noreply.github.com"
     }
   ],
   "license": "MIT",

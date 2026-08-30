@@ -382,3 +382,7 @@ export and settings are all here.
 MIT licensed. Not affiliated with or endorsed by Microsoft.
 
 *by theBoringCodes — Co-created with ♥ with Claude Cowork*
+
+**Web (PWA) build** is the work of Arif Miah ([@ArifMiah07](https://github.com/ArifMiah07)),
+based on the original Electron app by theBoringCodes. Run it with `npm run web`
+and test with `npm run web:smoke`.

@@ -1,0 +1,8 @@
+{
+  "outputDirectory": "src",
+  "cleanUrls": false,
+  "rewrites": [
+    { "source": "/sw.js", "destination": "/web/sw.js" },
+    { "source": "/manifest.webmanifest", "destination": "/web/manifest.webmanifest" }
+  ]
+}

@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>pdf-lib repro</title>
+<body></body>
+<script>
+const out = (s) => { document.body.textContent = (document.body.textContent ? document.body.textContent + '\n' : '') + s; };
+(async () => {
+  try {
+    const s = document.createElement('script');
+    s.src = '/vendor/pdf-lib.min.js';
+    await new Promise((r) => (s.onload = r));
+    out('loaded: ' + typeof PDFLib);
+    const doc = await PDFLib.PDFDocument.create();
+    out('created');
+    const page = doc.addPage([200, 200]);
+    out('addPage ok, pages=' + doc.getPageCount());
+    page.drawText('GazBoard smoke', { x: 20, y: 100, size: 16 });
+    out('drawText ok');
+    const bytes = await doc.save();
+    out('save ok, bytes=' + bytes.byteLength);
+    const re = new Uint8Array(bytes);
+    out('header: ' + String.fromCharCode(re[0], re[1], re[2], re[3], re[4]));
+  } catch (e) {
+    out('ERROR: ' + (e && e.message));
+  }
+})();
+</script>

@@ -190,9 +190,12 @@ export function createPanels(app) {
         info.innerHTML = `<b style="color:var(--text)">GazBoard ${i.version}</b> · by <b style="color:var(--accent)">theBoringCodes</b><br>` +
           `MD. Fakhruddin Gazzali · <a href="mailto:fahim9778@gmail.com" target="_blank" style="color:var(--accent)">fahim9778@gmail.com</a><br>` +
           `Created with <span style="color:#e81123">&hearts;</span> with Claude Cowork<br>` +
-          `Electron ${i.electron} · Chromium ${i.chrome}<br>` +
-          `Office conversion: <b>${i.libreoffice ? 'LibreOffice detected' : 'built-in converter'}</b><br>` +
-          `Boards folder: <code style="font-size:11px">${i.userData}</code>`;
+          (i.web ? 'Web build, running entirely in this browser<br>'
+            : `Electron ${i.electron} · Chromium ${i.chrome}<br>`) +
+          `Office conversion: <b>${i.libreoffice ? 'LibreOffice detected' : i.web ? 'built-in in-browser converter' : 'built-in converter'}</b><br>` +
+          (i.web
+            ? 'Boards are stored in this browser — no account, no cloud.'
+            : `Boards folder: <code style="font-size:11px">${i.userData}</code>`);
       });
 
       return h('div', {},
@@ -257,10 +260,15 @@ export function createPanels(app) {
     // in a settings screen.
     window.board.info().then((i) => {
       if (!document.getElementById('boardList')) return;
-      const foot = h('div', { style: 'margin-top:16px;padding-top:12px;border-top:1px solid var(--stroke);font-size:12px;color:var(--text-2);line-height:1.6' },
-        h('div', {}, `${list.length} board${list.length === 1 ? '' : 's'}, saved on this computer at:`),
-        h('code', { style: 'font-size:11px;display:block;margin:4px 0 8px;word-break:break-all' }, i.userData + '/boards'),
-        h('button', { class: 'btn', style: 'width:100%', onclick: () => window.board.showItem(i.userData + '/boards') }, 'Open that folder'));
+      const foot = h('div', { style: 'margin-top:16px;padding-top:12px;border-top:1px solid var(--stroke);font-size:12px;color:var(--text-2);line-height:1.6' });
+      if (i.web) {
+        foot.appendChild(h('div', {},
+          `${list.length} board${list.length === 1 ? '' : 's'}, saved in this browser. Your boards stay on this device — nothing is uploaded.`));
+      } else {
+        foot.appendChild(h('div', {}, `${list.length} board${list.length === 1 ? '' : 's'}, saved on this computer at:`));
+        foot.appendChild(h('code', { style: 'font-size:11px;display:block;margin:4px 0 8px;word-break:break-all' }, i.userData + '/boards'));
+        foot.appendChild(h('button', { class: 'btn', style: 'width:100%', onclick: () => window.board.showItem(i.userData + '/boards') }, 'Open that folder'));
+      }
       host.appendChild(foot);
     });
     for (const b of list) {

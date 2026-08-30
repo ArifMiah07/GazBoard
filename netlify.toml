@@ -1,0 +1,18 @@
+# Static deploy for the GazBoard web build.
+# Point Netlify at this repo and use publish directory "src" (no build command).
+[build]
+  publish = "src"
+  command = ""
+
+# index.html asks for ./sw.js and manifest.webmanifest at the root, but the
+# real files live in src/web/. serve.js aliases these for local dev; this is
+# the same mapping as a static rewrite (status 200 keeps the original URL).
+[[redirects]]
+  from = "/sw.js"
+  to = "/web/sw.js"
+  status = 200
+
+[[redirects]]
+  from = "/manifest.webmanifest"
+  to = "/web/manifest.webmanifest"
+  status = 200

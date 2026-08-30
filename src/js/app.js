@@ -1241,7 +1241,7 @@ class App {
     }));
     card.appendChild(h('p', { html:
       `A free-form digital whiteboard for pen, sticky notes, shapes, text, images and documents.` +
-      `<br><br>Runs entirely on this computer — no account, no sign-in, no cloud.` }));
+      `<br><br>Runs entirely on this ${i.web ? 'device' : 'computer'} — no account, no sign-in, no cloud.` }));
     card.appendChild(h('div', {
       style: 'margin-top:14px;padding-top:12px;border-top:1px solid var(--stroke);font-size:12.5px;line-height:1.8;color:var(--text-2)',
       html:
@@ -1251,8 +1251,9 @@ class App {
     card.appendChild(h('div', {
       style: 'margin-top:12px;font-size:11.5px;color:var(--text-2);line-height:1.7',
       html:
-        `Office import: <b>${i.libreoffice ? 'LibreOffice detected (high fidelity)' : 'built-in converter (install LibreOffice for higher fidelity)'}</b><br>` +
-        `Electron ${i.electron} · Chromium ${i.chrome}` }));
+        `Office import: <b>${i.web ? 'in-browser converter' : i.libreoffice ? 'LibreOffice detected (high fidelity)' : 'built-in converter (install LibreOffice for higher fidelity)'}</b><br>` +
+        (i.web ? 'Web build — PDF · Word · PowerPoint · text import and PDF export run entirely in your browser'
+          : `Electron ${i.electron} · Chromium ${i.chrome}`) }));
     // Next to the version number is where anyone looks for this.
     const check = h('button', { class: 'btn' }, 'Check for updates');
     check.addEventListener('click', async () => {
@@ -1262,7 +1263,7 @@ class App {
       await this.checkForUpdates({ force: true });
     });
     card.appendChild(h('div', { class: 'actions' },
-      check,
+      i.web ? null : check,
       h('button', { class: 'btn primary', onclick: () => overlay.classList.remove('show') }, 'Close')));
     overlay.classList.add('show');
   }
@@ -1345,7 +1346,17 @@ class App {
         for (const d of docs) await insertDocument(this, d);
         if (!imgs.length && !docs.length) this.toast('Unsupported file type');
       } else {
-        await insertImageFiles(this, files, at);
+        // browser build: File objects have no .path, so route them by kind
+        const imgs = files.filter((f) => f.type.startsWith('image/'));
+        if (imgs.length) await insertImageFiles(this, imgs, at);
+        const docs = files.filter((f) => isDocPath(f.name || ''));
+        const boards = files.filter((f) => /\.(gazboard|openboard|json)$/i.test(f.name || ''));
+        for (const d of boards) await window.board.openBoardFile?.(d);
+        for (const d of docs) {
+          const key = window.board.registerFile(d);
+          await insertDocument(this, key);
+        }
+        if (!imgs.length && !docs.length && !boards.length) this.toast('Unsupported file type');
       }
     });
 

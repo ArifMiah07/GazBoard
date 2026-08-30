@@ -586,9 +586,7 @@ export class Interaction {
     //
     // Nothing is lost by keeping them: points are only captured when the pen
     // has moved at least ~1.2px on screen, so the density is already bounded.
-    obj.points = obj.points.map((p) => ({
-      x: +p.x.toFixed(2), y: +p.y.toFixed(2), p: +(p.p ?? 0.5).toFixed(2)
-    }));
+    obj.points = obj.points.map((p) => ({ x: p.x, y: p.y, p: p.p ?? 0.5 }));
     obj.bbox = bboxOfPoints(obj.points);
 
     obj.attachedTo = this.lockedHostFor(obj) || undefined;

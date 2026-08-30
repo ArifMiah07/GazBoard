@@ -1690,9 +1690,27 @@ async function run(win, app) {
     const camX0 = sf.cam.x;
     move(X(10), Y(300));                          // drive the pen into the left edge
     const armed = !!it._edgeRaf;
-    await new Promise(r => setTimeout(r, 260));   // let the auto-pan loop run
-    const scrolled = Math.round(sf.cam.x - camX0);
+    // The auto-pan loop scrolls once per animation frame, and macOS throttles
+    // requestAnimationFrame hard when the window is not being composited - on a
+    // CI runner that can be one frame a second instead of sixty. Waiting a set
+    // 260ms therefore read as "auto-pan is broken" on a slow runner and as
+    // "auto-pan works" on a fast one. Wait for the camera to move instead.
+    let scrolled = 0;
+    for (let i = 0; i < 40 && scrolled <= 20; i++) {
+      await new Promise(r => setTimeout(r, 50));
+      scrolled = Math.round(sf.cam.x - camX0);
+    }
     const pointsWhileScrolling = it.action ? it.action.obj.points.length : 0;
+    // A right-button drag must survive the auto-pan loop. It did not for one
+    // release: two lines belonging to the constructor were pasted into the
+    // tick, so every frame of auto-pan quietly cancelled an in-flight
+    // right-drag and cleared the flag that stops the context menu appearing
+    // after one.
+    it.rightPan = { sx: 1, sy: 1 };
+    it._eatNextMenu = true;
+    await new Promise(r => setTimeout(r, 120));
+    const rightDragSurvivedAutoPan = !!it.rightPan && it._eatNextMenu === true;
+    it.rightPan = null; it._eatNextMenu = false;
     up(X(10), Y(300));
     const stopped = !it._edgeRaf;
 
@@ -1707,7 +1725,8 @@ async function run(win, app) {
     return { pinched, secondary, stillDrawing, panned, grewWhilePanning, releasedSecondary,
              stillDrawingAfter, strokeKept, touchPinches,
              middleVel, leftDir: leftVel ? Math.sign(leftVel.vx) : 0, rightDir: rightVel ? Math.sign(rightVel.vx) : 0,
-             armed, scrolled, pointsWhileScrolling, stopped, offVel };
+             armed, scrolled, pointsWhileScrolling, stopped, offVel,
+             rightDragSurvivedAutoPan };
   `);
   check('mouse during a pen stroke pans, not pinches', pan.secondary === true && pan.pinched === false && pan.stillDrawing === true);
   check('canvas follows the mouse drag', pan.panned === 100, pan.panned + 'px');
@@ -1718,6 +1737,7 @@ async function run(win, app) {
   check('edge velocity points inward', pan.leftDir > 0 && pan.rightDir < 0, `left ${pan.leftDir}, right ${pan.rightDir}`);
   check('auto-pan scrolls the canvas while drawing', pan.armed && pan.scrolled > 20 && pan.pointsWhileScrolling > 1, `${pan.scrolled}px, ${pan.pointsWhileScrolling} points`);
   check('auto-pan stops on pointer up', pan.stopped);
+  check('auto-pan does not cancel a right-button drag under it', pan.rightDragSurvivedAutoPan);
   check('the edge auto-pan setting disables it', pan.offVel === null);
 
   /* ---- templates ---- */

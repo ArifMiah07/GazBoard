@@ -586,7 +586,9 @@ export class Interaction {
     //
     // Nothing is lost by keeping them: points are only captured when the pen
     // has moved at least ~1.2px on screen, so the density is already bounded.
-    obj.points = obj.points.map((p) => ({ x: p.x, y: p.y, p: p.p ?? 0.5 }));
+    obj.points = obj.points.map((p) => ({
+      x: +p.x.toFixed(2), y: +p.y.toFixed(2), p: +(p.p ?? 0.5).toFixed(2)
+    }));
     obj.bbox = bboxOfPoints(obj.points);
 
     obj.attachedTo = this.lockedHostFor(obj) || undefined;
@@ -970,8 +972,6 @@ export class Interaction {
     if (this._edgeRaf) return;
     const tick = () => {
       this._edgeRaf = null;
-    this.rightPan = null;       // an in-flight right-button drag
-    this._eatNextMenu = false;  // a right-drag must not end in a context menu
       if (!this.action || !this.lastMotion) return;
       const v = this.edgeVelocity(this.lastMotion.sp);
       if (!v) return;

@@ -972,8 +972,6 @@ export class Interaction {
     if (this._edgeRaf) return;
     const tick = () => {
       this._edgeRaf = null;
-    this.rightPan = null;       // an in-flight right-button drag
-    this._eatNextMenu = false;  // a right-drag must not end in a context menu
       if (!this.action || !this.lastMotion) return;
       const v = this.edgeVelocity(this.lastMotion.sp);
       if (!v) return;

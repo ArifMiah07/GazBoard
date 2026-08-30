@@ -66,7 +66,8 @@ export class Surface {
    * display-scaling change that fires no event we happened to listen for.
    */
   resize(force = false) {
-    const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
+    const box = this.canvas.getBoundingClientRect();
+    const w = Math.round(box.width), h = Math.round(box.height);
     if (!w || !h) return false;
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     if (!force && w === this.width && h === this.height && dpr === this.dpr) return false;

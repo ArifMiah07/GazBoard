@@ -422,6 +422,21 @@ export function drawImage(ctx, o, onload) {
   }
   if (img) {
     ctx.drawImage(img, o.x, o.y, o.w, o.h);
+  } else if (o.missing) {
+    // The board points at a picture whose file is not there - most likely the
+    // board travelled without the assets folder beside it. Say so, and hold the
+    // space: the reference is kept, so putting the file back brings it back.
+    ctx.fillStyle = '#faf9f8';
+    ctx.fillRect(o.x, o.y, o.w, o.h);
+    ctx.strokeStyle = '#c8c6c4';
+    ctx.setLineDash([8, 6]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(o.x + 0.5, o.y + 0.5, o.w - 1, o.h - 1);
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#a19f9d';
+    ctx.font = `14px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Picture not found', o.x + o.w / 2, o.y + o.h / 2);
   } else {
     ctx.fillStyle = '#edebe9';
     ctx.fillRect(o.x, o.y, o.w, o.h);

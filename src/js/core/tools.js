@@ -31,6 +31,9 @@ export class Interaction {
     this.pinch = null;
     this.secondaryPan = null;   // mouse dragging the canvas while the pen draws
     this.lastMotion = null;     // last pointer position of the primary gesture
+    this.actionId = null;       // the pointer that owns the gesture in flight
+    this._penAt = 0;            // when the stylus was last heard from
+    this._penSp = null;         // and where it was, in screen coordinates
     this._edgeRaf = null;
     this.rightPan = null;       // an in-flight right-button drag
     this._eatNextMenu = false;  // a right-drag must not end in a context menu
@@ -90,7 +93,13 @@ export class Interaction {
       // Right-drag pans, for anyone without a pen, a middle button or a
       // trackpad. It starts nothing that touches the document, and a right
       // click that does not move still opens the context menu as always.
-      if (this.app.settings.rightDragPans !== false) {
+      // Only ever from an idle canvas. Windows reports a pen's barrel button as
+      // a button-2 pointerdown on the SAME pointerId that is already writing,
+      // so squeezing it mid-word used to hand the pen to the panner: the rest
+      // of that stroke was swallowed, and because the matching pointerup took
+      // the right-drag path below, the pointer was never released either - so
+      // the NEXT stroke counted as a second finger and never started at all.
+      if (this.app.settings.rightDragPans !== false && !this.action && !this.pointers.has(e.pointerId)) {
         const sp0 = this.surface.screenPoint(e);
         this.rightPan = { id: e.pointerId, sp: sp0, cam: { x: this.surface.cam.x, y: this.surface.cam.y }, moved: false };
         try { this.canvas.setPointerCapture?.(e.pointerId); } catch { /* synthetic pointer */ }
@@ -98,7 +107,15 @@ export class Interaction {
       return;
     }
     try { this.canvas.setPointerCapture?.(e.pointerId); } catch { /* synthetic or already-released pointer */ }
+    if (e.pointerType === 'pen') this._penAt = performance.now();
     this.app.hideMenus();
+    // A pointerup that never arrives - a pen lifted as the window loses focus,
+    // a cancel routed elsewhere - used to leave its id in the map for good.
+    // The next pen down then looked like a second finger and was treated as a
+    // pinch instead of a stroke, and the one after that was ignored outright.
+    // With no gesture in flight nothing can be relying on these entries, so
+    // they are stale by definition and safe to forget.
+    if (this.pointers.size && !this.action && !this.pinch && !this.secondaryPan) this.pointers.clear();
     const sp = this.surface.screenPoint(e);
     const wp = this.surface.cam.toWorld(sp.x, sp.y);
     if (e.pointerType === 'pen') this.app.notePenSeen();
@@ -108,6 +125,17 @@ export class Interaction {
       // Two fingers pinch. A mouse (or a second pen) arriving while a stroke
       // is already down means "pan the canvas under what I'm drawing" instead.
       const types = [...this.pointers.values()].map((p) => p.type);
+      // A hand resting on the glass while the pen writes is a palm, not a
+      // second finger. It used to satisfy "not every pointer is touch", so it
+      // started a canvas pan under the nib: the cursor turned into a hand for
+      // a moment and the writing slid away underneath. Drop it and carry on
+      // inking. The mouse-pans-under-the-pen gesture below is unaffected -
+      // that one is a mouse, deliberately put down by the other hand.
+      if (this.action && e.pointerType === 'touch' && types.includes('pen')) {
+        this.pointers.delete(e.pointerId);
+        try { this.canvas.releasePointerCapture?.(e.pointerId); } catch { /* never captured */ }
+        return;
+      }
       if (this.action && !types.every((t) => t === 'touch')) this.startSecondaryPan(e, sp);
       else this.startPinch();
       return;
@@ -197,6 +225,8 @@ export class Interaction {
       }
       case 'select': default: this.startSelect(e, sp, wp); break;
     }
+    // Whichever pointer began the gesture owns it until it lifts.
+    this.actionId = this.action ? e.pointerId : null;
     this.surface.invalidate();
   }
 
@@ -204,6 +234,9 @@ export class Interaction {
   moveRightPan(e) {
     const rp = this.rightPan;
     if (!rp || e.pointerId !== rp.id) return false;
+    // Something real took this pointer after the right button went down. It
+    // owns the movement; the pan quietly stands down.
+    if (this.action) { this.rightPan = null; return false; }
     const sp = this.surface.screenPoint(e);
     const dx = sp.x - rp.sp.x, dy = sp.y - rp.sp.y;
     if (!rp.moved && Math.hypot(dx, dy) < TAP_SLOP) return true;   // still a click
@@ -221,6 +254,7 @@ export class Interaction {
     if (this.moveRightPan(e)) return;
     if (e.pointerType === 'pen' && e.buttons) this.app.notePenSeen();
     const sp = this.surface.screenPoint(e);
+    if (e.pointerType === 'pen') { this._penAt = performance.now(); this._penSp = sp; }
     const wp = this.surface.cam.toWorld(sp.x, sp.y);
     if (this.pointers.has(e.pointerId)) this.pointers.set(e.pointerId, { sp, wp, type: e.pointerType });
 
@@ -228,7 +262,30 @@ export class Interaction {
 
     if (this.secondaryPan && e.pointerId === this.secondaryPan.id) { this.updateSecondaryPan(sp); return; }
 
-    if (!this.action) { this.updateHover(sp, wp, e.pointerType); return; }
+    if (!this.action) {
+      /*
+       * Windows puts the mouse pointer back the instant the pen leaves
+       * proximity: a pointermove arrives with pointerType 'mouse', at the
+       * position the nib just left, with no button held. Nobody touched the
+       * mouse. Answering it repainted the cursor, so every full stop and every
+       * lifted stroke ended in a hand flashing where the nib had been.
+       *
+       * The ghost is recognisable by WHERE it lands: on the nib's own last
+       * position, moments after it. A mouse someone has actually picked up is
+       * somewhere else, and keeps sending moves besides - so a hand is still
+       * shown the instant the mouse is really used.
+       */
+      if (e.pointerType === 'mouse' && !e.buttons && this._penSp
+          && performance.now() - this._penAt < 800
+          && Math.hypot(sp.x - this._penSp.x, sp.y - this._penSp.y) < 4) return;
+      this.updateHover(sp, wp, e.pointerType);
+      return;
+    }
+
+    // Every pointer used to advance the active gesture, whoever it belonged to.
+    // A palm sliding on the screen therefore dragged the pen's stroke over to
+    // the palm - the ink jumped, or looked like it had simply gone missing.
+    if (this.actionId != null && e.pointerId !== this.actionId) return;
 
     this.lastMotion = { sp, mods: { shift: e.shiftKey, alt: e.altKey }, pressure: this.pressure(e) };
     this.applyMotion(sp, this.lastMotion.mods, e);
@@ -260,21 +317,40 @@ export class Interaction {
         // it comes back on, exactly as ink behaves at the edge of a page.
         const keep = (q) => !a.sheet || inRect(a.sheet, q.x, q.y);
         const pt = this.snapToRuler({ ...wp, p: pressure }, a);
-        const last = a.obj.points[a.obj.points.length - 1];
-        if (!last || dist(last, pt) * this.surface.cam.z > 1.2) {
-          // coalesced events give smoother ink on high-rate pens
-          const evs = e && e.getCoalescedEvents ? e.getCoalescedEvents() : null;
-          let added = false;
-          if (evs && evs.length) {
-            for (const ce of evs) {
-              const csp = this.surface.screenPoint(ce);
-              const cwp = this.surface.cam.toWorld(csp.x, csp.y);
-              const cp = this.snapToRuler({ ...cwp, p: this.pressure(ce) }, a);
-              if (keep(cp)) { a.obj.points.push(cp); added = true; }
-            }
-          } else if (keep(pt)) { a.obj.points.push(pt); added = true; }
-          if (added) a.obj.bbox = bboxOfPoints(a.obj.points);
-        }
+        let added = false;
+
+        /*
+         * Spacing is judged for each candidate point against the one before it,
+         * never for the batch as a whole.
+         *
+         * It used to gate on the LAST position in the batch: if the pen ended
+         * the frame near where the previous point was, the whole batch was
+         * thrown away - and a high-rate pen delivers a batch per frame. On the
+         * turns of an n, w or s the nib goes out and comes straight back, so
+         * the frame ends close to where it started even though the pen
+         * travelled a long way in between. The excursion was in the coalesced
+         * events, and it was discarded with them: the peak of the letter
+         * simply never arrived.
+         */
+        const offer = (cand) => {
+          const prev = a.obj.points[a.obj.points.length - 1];
+          if (prev && dist(prev, cand) * this.surface.cam.z <= 1.2) return;
+          if (!keep(cand)) return;
+          a.obj.points.push(cand);
+          added = true;
+        };
+
+        // coalesced events give smoother ink on high-rate pens
+        const evs = e && e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+        if (evs && evs.length) {
+          for (const ce of evs) {
+            const csp = this.surface.screenPoint(ce);
+            const cwp = this.surface.cam.toWorld(csp.x, csp.y);
+            offer(this.snapToRuler({ ...cwp, p: this.pressure(ce) }, a));
+          }
+        } else offer(pt);
+
+        if (added) a.obj.bbox = bboxOfPoints(a.obj.points);
         break;
       }
       case 'erase': {
@@ -356,13 +432,19 @@ export class Interaction {
   }
 
   onUp(e) {
+    if (e.pointerType === 'pen') { this._penAt = performance.now(); this._penSp = this.surface.screenPoint(e); }
     if (this.rightPan && e.pointerId === this.rightPan.id) {
       const moved = this.rightPan.moved;
       this.rightPan = null;
       // only a drag swallows the menu; a plain right-click still opens it
       if (moved) this._eatNextMenu = true;
-      this.updateHover(this.surface.screenPoint(e), this.surface.cam.toWorld(0, 0), e.pointerType);
-      return;
+      // Only bow out early if this pointer is doing nothing else. If it is also
+      // mid-gesture, fall through so the gesture is finished and the pointer is
+      // forgotten, rather than both being left hanging.
+      if (!this.pointers.has(e.pointerId)) {
+        this.updateHover(this.surface.screenPoint(e), this.surface.cam.toWorld(0, 0), e.pointerType);
+        return;
+      }
     }
     this.pointers.delete(e.pointerId);
     if (this.secondaryPan && e.pointerId === this.secondaryPan.id) { this.secondaryPan = null; return; }
@@ -401,7 +483,11 @@ export class Interaction {
       case 'textDraw': this.finishTextBox(a); break;
     }
     this.action = null;
+    this.actionId = null;
     this.app.syncUI();
+    // The one moment a save cannot interrupt anything: the gesture is over and
+    // the next has not begun.
+    this.app.onGestureEnd?.();
     this.surface.invalidate();
   }
 

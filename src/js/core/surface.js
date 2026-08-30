@@ -29,6 +29,8 @@ export class Surface {
     this.overlays = [];        // fn(ctx, surface) drawn in screen space
     this.wet = null;           // in-progress stroke object
     this.laser = [];           // pointer trail: {x,y,t} world points, never saved
+    this._lockedRev = -1;      // revision the locked-object list was built for
+    this._locked = [];
     this.selection = new Set();
     this.hoverId = null;
     this._raf = null;
@@ -66,8 +68,7 @@ export class Surface {
    * display-scaling change that fires no event we happened to listen for.
    */
   resize(force = false) {
-    const box = this.canvas.getBoundingClientRect();
-    const w = Math.round(box.width), h = Math.round(box.height);
+    const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
     if (!w || !h) return false;
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     if (!force && w === this.width && h === this.height && dpr === this.dpr) return false;
@@ -274,8 +275,18 @@ export class Surface {
       }
     }
 
-    for (const o of this.store.objects) {
-      if (!o || !o.locked) continue;
+    /*
+     * Locked objects wear a badge. Finding them used to mean walking the whole
+     * document on every single frame - on a board with a thousand strokes that
+     * is a thousand checks per frame, for a handful of badges, while the pen is
+     * moving. Which objects are locked can only change when the document does,
+     * so the list is kept and rebuilt on the revision instead.
+     */
+    if (this._lockedRev !== this.store.rev) {
+      this._lockedRev = this.store.rev;
+      this._locked = this.store.objects.filter((o) => o && o.locked);
+    }
+    for (const o of this._locked) {
       if (!boxesIntersect(vbox, worldBounds(o))) continue;
       drawLockBadge(ctx, cam, o);
     }

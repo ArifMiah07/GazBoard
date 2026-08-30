@@ -6,6 +6,7 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
+const crypto = require('node:crypto');
 
 const SRC = path.join(__dirname, 'src');
 const isDev = process.argv.includes('--dev');
@@ -68,6 +69,46 @@ const lastBoardFile = () => path.join(app.getPath('userData'), 'last-board.json'
  * Write via a temp file and rename. Rename is atomic on Windows and POSIX, so a
  * power cut can leave the old file or the new one - never a half-written one.
  */
+/* =================================================================== *
+ *  The asset store
+ *
+ *  Pictures and imported pages used to be written inside the board file, as
+ *  base64 text. A board carrying a few slides came to tens of megabytes, and
+ *  every save rewrote all of it to record one new stroke - which is time spent
+ *  on the thread that watches the pen.
+ *
+ *  They live in their own files now, named for a SHA-256 of their contents, and
+ *  the board keeps only "asset:<name>". Identical pictures are stored once
+ *  however many boards or pages use them, and a picture is only ever written
+ *  the first time it is seen.
+ *
+ *  Nothing is ever deleted here. An orphaned file costs disk; a file deleted
+ *  while a board still wanted it costs someone their work.
+ * =================================================================== */
+const assetsDir = () => path.join(app.getPath('userData'), 'assets');
+const ASSET_NAME = /^[0-9a-f]{64}\.[a-z0-9]{1,8}$/;   // nothing else is opened
+const ASSET_EXT = {
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
+  'image/webp': 'webp', 'image/bmp': 'bmp', 'image/svg+xml': 'svg'
+};
+const ASSET_MIME = {
+  png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml'
+};
+
+/** Split a data: URL into its media type and its bytes. Null if it is not one. */
+function decodeDataUrl(url) {
+  const m = /^data:([^;,]*)(;base64)?,/.exec(String(url || ''));
+  if (!m) return null;
+  const body = String(url).slice(m[0].length);
+  try {
+    return {
+      mime: m[1] || 'application/octet-stream',
+      buf: m[2] ? Buffer.from(body, 'base64') : Buffer.from(decodeURIComponent(body), 'utf8')
+    };
+  } catch { return null; }
+}
+
 async function writeAtomic(file, text) {
   const tmp = file + '.' + process.pid + '.tmp';
   await fsp.writeFile(tmp, text);
@@ -528,12 +569,62 @@ function ipc() {
     await ensureDataDir();
     try { return JSON.parse(await fsp.readFile(path.join(dataDir(), id + '.json'), 'utf8')); } catch { return null; }
   });
-  ipcMain.handle('boards:save', async (_e, board) => {
+  ipcMain.handle('boards:save', async (_e, payload) => {
     await ensureDataDir();
-    await writeAtomic(path.join(dataDir(), board.id + '.json'), JSON.stringify(board));
-    await setLastBoard(board.id);
+    // The renderer sends { id, json }. An older shape - the board object itself -
+    // is still accepted so nothing breaks if the two sides are ever out of step.
+    const board = (payload && typeof payload.json === 'string')
+      ? { id: payload.id, json: payload.json }
+      : { id: payload.id, json: JSON.stringify(payload) };
+    // the board and the "last open" pointer are two separate files; there is no
+    // ordering between them, so they go out together rather than one after the
+    // other
+    await Promise.all([
+      writeAtomic(path.join(dataDir(), board.id + '.json'), board.json),
+      setLastBoard(board.id)
+    ]);
     return true;
   });
+  /**
+   * Store one picture and return the name the board should remember. Returns
+   * null if it cannot - the caller then keeps the picture inline, exactly as
+   * before, so a failure here can never lose an image.
+   */
+  ipcMain.handle('assets:put', async (_e, dataUrl) => {
+    try {
+      const d = decodeDataUrl(dataUrl);
+      if (!d || !d.buf.length) return null;
+      const ext = ASSET_EXT[d.mime] || 'bin';
+      const id = crypto.createHash('sha256').update(d.buf).digest('hex') + '.' + ext;
+      await fsp.mkdir(assetsDir(), { recursive: true });
+      const file = path.join(assetsDir(), id);
+      // already stored: the name IS the contents, so there is nothing to do
+      try { await fsp.access(file); return { id }; } catch { /* first time */ }
+      await writeAtomic(file, d.buf);
+      return { id };
+    } catch { return null; }
+  });
+
+  /** Read one picture back as a data: URL. Null when it is not there. */
+  ipcMain.handle('assets:get', async (_e, id) => {
+    if (!ASSET_NAME.test(String(id || ''))) return null;
+    try {
+      const buf = await fsp.readFile(path.join(assetsDir(), id));
+      const mime = ASSET_MIME[String(id).split('.').pop()] || 'application/octet-stream';
+      return 'data:' + mime + ';base64,' + buf.toString('base64');
+    } catch { return null; }
+  });
+
+  /** Which of these are already stored. Used to avoid sending bytes needlessly. */
+  ipcMain.handle('assets:have', async (_e, ids) => {
+    const out = {};
+    for (const id of Array.isArray(ids) ? ids : []) {
+      if (!ASSET_NAME.test(String(id || ''))) { out[id] = false; continue; }
+      try { await fsp.access(path.join(assetsDir(), id)); out[id] = true; } catch { out[id] = false; }
+    }
+    return out;
+  });
+
   ipcMain.handle('boards:last', () => getLastBoard());
   // idempotent, and safe to call any time: it only ever copies files that are missing
   ipcMain.handle('boards:migrate', () => migrateLegacyData());

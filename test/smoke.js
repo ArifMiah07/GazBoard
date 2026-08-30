@@ -1714,6 +1714,47 @@ async function run(win, app) {
     up(X(10), Y(300));
     const stopped = !it._edgeRaf;
 
+    // --- 3b. the barrel button, and a pointerup that never arrives ---
+    // Both of these ended with the pen unable to draw at all, so they are
+    // checked as a sequence: write, squeeze, write again.
+    a.store.clear(); it.action = null; it.pointers.clear(); it.rightPan = null;
+    const rightDown = (x, y, id = 1, type = 'pen') => it.onDown({ pointerId: id, pointerType: type,
+      button: 2, buttons: 2, clientX: x, clientY: y, shiftKey: false, altKey: false, pressure: 0 });
+
+    // Hover the pen first, the way a real one does before it touches down, so
+    // the cursor starts as the nib rather than as whatever the previous part of
+    // this test left behind.
+    a.setTool('pen');
+    it.updateHover({ x: 200, y: 200 }, sf.cam.toWorld(200, 200), 'pen');
+    down(X(200), Y(200));
+    move(X(240), Y(200));
+    const cursorBeforeBarrel = sf.canvas.style.cursor || '';
+    rightDown(X(240), Y(200));                  // barrel button, mid-stroke, same pointer
+    const barrelKeptStroke = !!(it.action && it.action.type === 'draw');
+    const camBeforeBarrel = sf.cam.x;
+    move(X(300), Y(200));
+    const barrelDidNotPan = sf.cam.x === camBeforeBarrel;
+    // The give-away when this went wrong was visible: the pen cursor turned
+    // into a hand for a split second in the middle of a word. Nothing but the
+    // panner sets a hand cursor, so it doubles as proof the panner kept out.
+    const cursorMidStroke = sf.canvas.style.cursor || '';
+    const stayedAPen = cursorMidStroke === cursorBeforeBarrel;
+    const barrelStrokeGrew = it.action && it.action.type === 'draw' && it.action.obj.points.length > 1;
+    up(X(300), Y(200));
+    const barrelCommitted = a.store.objects.filter(o => o.type === 'stroke').length === 1;
+    const pointerReleased = it.pointers.size === 0;
+
+    // a second stroke must still start after all that
+    down(X(200), Y(260)); move(X(300), Y(260)); up(X(300), Y(260));
+    const secondStrokeDrew = a.store.objects.filter(o => o.type === 'stroke').length === 2;
+
+    // now strand a pointer the way a missed pointerup does, and write again
+    a.store.clear(); it.action = null; it.rightPan = null;
+    it.pointers.set(99, { sp: { x: 0, y: 0 }, wp: { x: 0, y: 0 }, type: 'pen' });
+    down(X(200), Y(320)); move(X(300), Y(320)); up(X(300), Y(320));
+    const strokeAfterStrandedPointer = a.store.objects.filter(o => o.type === 'stroke').length === 1;
+    a.store.clear(); it.action = null; it.pointers.clear(); it.rightPan = null;
+
     // --- 4. the setting turns it off ---
     a.settings.edgePan = false;
     down(X(300), Y(300)); move(X(10), Y(300));
@@ -1726,7 +1767,10 @@ async function run(win, app) {
              stillDrawingAfter, strokeKept, touchPinches,
              middleVel, leftDir: leftVel ? Math.sign(leftVel.vx) : 0, rightDir: rightVel ? Math.sign(rightVel.vx) : 0,
              armed, scrolled, pointsWhileScrolling, stopped, offVel,
-             rightDragSurvivedAutoPan };
+             rightDragSurvivedAutoPan, barrelKeptStroke, barrelDidNotPan, barrelStrokeGrew,
+             barrelCommitted, pointerReleased, secondStrokeDrew, strokeAfterStrandedPointer,
+             stayedAPen, cursorChange: cursorBeforeBarrel === cursorMidStroke
+               ? 'unchanged' : cursorBeforeBarrel.slice(0, 24) + ' -> ' + cursorMidStroke.slice(0, 24) };
   `);
   check('mouse during a pen stroke pans, not pinches', pan.secondary === true && pan.pinched === false && pan.stillDrawing === true);
   check('canvas follows the mouse drag', pan.panned === 100, pan.panned + 'px');
@@ -1738,7 +1782,288 @@ async function run(win, app) {
   check('auto-pan scrolls the canvas while drawing', pan.armed && pan.scrolled > 20 && pan.pointsWhileScrolling > 1, `${pan.scrolled}px, ${pan.pointsWhileScrolling} points`);
   check('auto-pan stops on pointer up', pan.stopped);
   check('auto-pan does not cancel a right-button drag under it', pan.rightDragSurvivedAutoPan);
+  check('the barrel button does not take the pen away mid-stroke',
+    pan.barrelKeptStroke && pan.barrelDidNotPan && pan.barrelStrokeGrew && pan.barrelCommitted,
+    JSON.stringify({ kept: pan.barrelKeptStroke, noPan: pan.barrelDidNotPan, grew: pan.barrelStrokeGrew, committed: pan.barrelCommitted }));
+  check('and the cursor never flickers to a hand while inking', pan.stayedAPen, pan.cursorChange);
+  check('and the pen is released afterwards, so the next stroke still draws',
+    pan.pointerReleased && pan.secondStrokeDrew, `pointers ${pan.pointerReleased}, second stroke ${pan.secondStrokeDrew}`);
+  check('a pointer stranded by a missed pointerup does not block the next stroke',
+    pan.strokeAfterStrandedPointer);
   check('the edge auto-pan setting disables it', pan.offVel === null);
+
+  /* ---- a palm on the glass, and a reversal in a letter ---- */
+  const hand = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    a.newBoard(true); sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.setTool('pen'); a.settings.inkToShape = false;
+    it.action = null; it.actionId = null; it.pointers.clear();
+    it.rightPan = null; it.pinch = null; it.secondaryPan = null;
+
+    const rect = sf.canvas.getBoundingClientRect();
+    const X = (v) => rect.left + v, Y = (v) => rect.top + v;
+    const mk = (x, y, id, type, extra) => Object.assign({ pointerId: id, pointerType: type,
+      button: 0, buttons: 1, clientX: x, clientY: y, shiftKey: false, altKey: false, pressure: 0.5 }, extra || {});
+
+    // --- the pen writes; a palm lands on the glass halfway through ---
+    it.updateHover({ x: 200, y: 200 }, sf.cam.toWorld(200, 200), 'pen');
+    it.onDown(mk(X(200), Y(200), 1, 'pen'));
+    it.onMove(mk(X(240), Y(200), 1, 'pen'));
+    const cursorBefore = sf.canvas.style.cursor || '';
+    const camBefore = sf.cam.x;
+    const ptsBefore = it.action.obj.points.length;
+
+    it.onDown(mk(X(600), Y(500), 7, 'touch'));           // the heel of the hand
+    const noSecondaryPan = !it.secondaryPan && !it.pinch;
+    const cursorUnchanged = (sf.canvas.style.cursor || '') === cursorBefore;
+    const stillDrawing = !!(it.action && it.action.type === 'draw');
+
+    it.onMove(mk(X(680), Y(560), 7, 'touch'));           // the palm slides as you write
+    const camUnmoved = sf.cam.x === camBefore;
+    const strokeIgnoredPalm = it.action.obj.points.length === ptsBefore;
+
+    it.onMove(mk(X(280), Y(200), 1, 'pen'));             // the pen keeps writing
+    const penStillWrites = it.action.obj.points.length > ptsBefore;
+    it.onUp(mk(X(680), Y(560), 7, 'touch'));
+    it.onUp(mk(X(280), Y(200), 1, 'pen'));
+    const palmStrokeKept = a.store.objects.filter(o => o.type === 'stroke').length === 1;
+
+    // --- a reversal, the way the turn of an n or a w arrives ---
+    a.store.clear(); it.action = null; it.actionId = null; it.pointers.clear();
+    const coalesced = [
+      mk(X(200), Y(300), 1, 'pen'), mk(X(200), Y(285), 1, 'pen'), mk(X(200), Y(270), 1, 'pen'),
+      mk(X(200), Y(285), 1, 'pen'), mk(X(200), Y(300.4), 1, 'pen')
+    ];
+    it.onDown(mk(X(200), Y(300), 1, 'pen'));
+    // one frame of a high-rate pen: out 30px and back, ending where it began
+    it.onMove(mk(X(200), Y(300.4), 1, 'pen', { getCoalescedEvents: () => coalesced }));
+    const pts = it.action.obj.points;
+    let reach = 0;
+    for (const q of pts) reach = Math.max(reach, Math.abs(q.y - pts[0].y));
+    it.onUp(mk(X(200), Y(300.4), 1, 'pen'));
+    a.store.clear(); it.action = null; it.actionId = null; it.pointers.clear();
+
+    return { noSecondaryPan, cursorUnchanged, stillDrawing, camUnmoved, strokeIgnoredPalm,
+             penStillWrites, palmStrokeKept, reach: Math.round(reach), points: pts.length };
+  `);
+  check('a palm landing while the pen writes is ignored, not treated as a pan',
+    hand.noSecondaryPan && hand.cursorUnchanged && hand.stillDrawing,
+    JSON.stringify({ noPan: hand.noSecondaryPan, cursor: hand.cursorUnchanged, drawing: hand.stillDrawing }));
+  check('a palm sliding on the glass moves neither the canvas nor the stroke',
+    hand.camUnmoved && hand.strokeIgnoredPalm,
+    JSON.stringify({ cam: hand.camUnmoved, stroke: hand.strokeIgnoredPalm }));
+  check('and the pen carries on writing through it',
+    hand.penStillWrites && hand.palmStrokeKept);
+  check('the turn of an n or a w survives, even when the frame ends where it began',
+    hand.reach > 25, `reached ${hand.reach}px from the start, ${hand.points} points`);
+
+  /* ---- the cursor after the pen lifts ---- */
+  const afterLift = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    a.newBoard(true); sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.setTool('pen'); a.notePenSeen();
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const X = (v) => rect.left + v, Y = (v) => rect.top + v;
+    const mk = (x, y, type, buttons) => ({ pointerId: type === 'mouse' ? 3 : 1, pointerType: type,
+      button: 0, buttons, clientX: x, clientY: y, shiftKey: false, altKey: false, pressure: 0.5 });
+
+    // a dot: down, a whisker of movement, up
+    it.onDown(mk(X(300), Y(300), 'pen', 1));
+    it.onMove(mk(X(302), Y(301), 'pen', 1));
+    it.onUp(mk(X(302), Y(301), 'pen', 0));
+    const nib = sf.canvas.style.cursor || '';
+
+    // Windows re-asserts the mouse pointer as the pen leaves proximity: a
+    // pointermove arrives with pointerType 'mouse', at the pen's own position,
+    // with nothing pressed. Nobody touched the mouse.
+    it.onMove(mk(X(302), Y(301), 'mouse', 0));
+    const afterGhost = sf.canvas.style.cursor || '';
+
+    // a real mouse move, later, must still say what a click will do
+    it._penAt = 0;
+    it.onMove(mk(X(500), Y(400), 'mouse', 0));
+    const afterRealMouse = sf.canvas.style.cursor || '';
+
+    a.store.clear(); it.action = null; it.pointers.clear();
+    return { nibIsPen: nib.startsWith('url('), ghostKeptNib: afterGhost === nib,
+             realMouseStillGrabs: afterRealMouse === 'grab',
+             ghost: afterGhost.slice(0, 20), real: afterRealMouse };
+  `);
+  check('the pen nib survives the pen lifting off', afterLift.nibIsPen);
+  check('the cursor does not flash to a hand when the pen leaves the screen',
+    afterLift.ghostKeptNib, `became "${afterLift.ghost}"`);
+  check('but a real mouse move still shows what a click will do',
+    afterLift.realMouseStillGrabs, afterLift.real);
+
+  /* ---- what a busy board costs while you write on it ---- */
+  const busy = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    a.settings.autosave = false;
+    a.newBoard(true); sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+
+    const bulk = [];
+    for (let i = 0; i < 400; i++) {
+      const bx = (i % 20) * 60 - 600, by = Math.floor(i / 20) * 60 - 600;
+      bulk.push({ id: 'busy' + i, type: 'stroke', tool: 'pen', color: '#1a1a1a', width: 3,
+                  effect: 'none', points: [{ x: bx, y: by, p: 0.5 }, { x: bx + 30, y: by + 6, p: 0.5 }],
+                  bbox: { x: bx, y: by, w: 30, h: 6 } });
+    }
+    a.store.addMany(bulk, 'bulk');
+
+    // The badge pass must not re-scan the document on every frame.
+    sf.draw();
+    const firstList = sf._locked;
+    sf.draw();
+    const reusedBetweenFrames = sf._locked === firstList;
+    a.store.add({ id: 'busy-lock', type: 'shape', kind: 'rect', x: 0, y: 0, w: 10, h: 10,
+                  rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2, locked: true });
+    sf.draw();
+    const rebuiltOnChange = sf._locked !== firstList && sf._locked.length === 1;
+
+    // Saving must never land inside a stroke, must happen once one ends, and
+    // must not be starved by someone who draws without ever really stopping.
+    a.settings.autosave = true;
+    let saves = 0;
+    const realPersist = a.persist.bind(a);
+    a.persist = async (...args) => { saves++; return realPersist(...args); };
+
+    const rect = sf.canvas.getBoundingClientRect();
+    const pev = (x, y) => ({ pointerId: 1, pointerType: 'pen', button: 0, buttons: 1,
+      clientX: rect.left + x, clientY: rect.top + y, shiftKey: false, altKey: false, pressure: 0.5 });
+    a.setTool('pen'); a.settings.inkWithMouse = 'yes';
+
+    // (1) a stroke is in flight when the timer comes round
+    it.onDown(pev(100, 100));
+    it.onMove(pev(140, 120));
+    a.autosave();
+    await new Promise(r => setTimeout(r, 1100));
+    const heldOffWhileDrawing = saves === 0;
+
+    // (2) the stroke ends: a save follows
+    it.onUp(pev(180, 140));
+    await new Promise(r => setTimeout(r, 1100));
+    const savedOnceTheHandStopped = saves >= 1;
+
+    // (3) drawing steadily past the ceiling: the next stroke to END is written
+    // at once, without waiting for a pause
+    saves = 0;
+    a._lastSaveAt = performance.now() - 60000;
+    a._unsaved = true;
+    it.onDown(pev(200, 200));
+    it.onMove(pev(240, 220));
+    const stillNothingMidStroke = saves === 0;
+    it.onUp(pev(280, 240));
+    const savedImmediatelyAtTheCeiling = saves >= 1;
+
+    a.persist = realPersist;
+    return { reusedBetweenFrames, rebuiltOnChange, heldOffWhileDrawing, savedOnceTheHandStopped,
+             stillNothingMidStroke, savedImmediatelyAtTheCeiling };
+  `);
+  check('the locked-badge pass does not re-scan the board every frame',
+    busy.reusedBetweenFrames && busy.rebuiltOnChange,
+    JSON.stringify({ reused: busy.reusedBetweenFrames, rebuilt: busy.rebuiltOnChange }));
+  check('a save never lands inside a stroke, and follows once one ends',
+    busy.heldOffWhileDrawing && busy.savedOnceTheHandStopped,
+    JSON.stringify({ heldOff: busy.heldOffWhileDrawing, thenSaved: busy.savedOnceTheHandStopped }));
+  check('drawing without pausing cannot starve the save past its ceiling',
+    busy.stillNothingMidStroke && busy.savedImmediatelyAtTheCeiling,
+    JSON.stringify({ quietMidStroke: busy.stillNothingMidStroke, wroteAtStrokeEnd: busy.savedImmediatelyAtTheCeiling }));
+
+  /* ---- pictures live in their own files ---- */
+  const assets = await js(`
+    const a = window.app;
+    a.settings.autosave = false;
+
+    // a real PNG, big enough that inlining it would be obvious in the board file
+    const cnv = document.createElement('canvas');
+    cnv.width = 400; cnv.height = 300;
+    const g = cnv.getContext('2d');
+    const im = g.createImageData(400, 300);
+    for (let i = 0; i < im.data.length; i += 4) {
+      im.data[i] = (i * 7) % 255; im.data[i+1] = (i * 13) % 255;
+      im.data[i+2] = (i * 29) % 255; im.data[i+3] = 255;
+    }
+    g.putImageData(im, 0, 0);
+    const png = cnv.toDataURL('image/png');
+
+    // --- 1. a board with two copies of the same picture ---
+    a.newBoard(true);
+    a.store.add({ id: 'pic-a', type: 'image', src: png, x: 0, y: 0, w: 400, h: 300, rotation: 0 });
+    a.store.add({ id: 'pic-b', type: 'image', src: png, x: 500, y: 0, w: 400, h: 300, rotation: 0 });
+    const boardId = a.store.doc.id;
+    await a.persist({ force: true });
+
+    const onDisk = await window.board.boards.load(boardId);
+    const diskText = JSON.stringify(onDisk);
+    const diskPic = onDisk.objects.find(o => o.id === 'pic-a');
+    const wroteAReference = typeof diskPic.src === 'string' && diskPic.src.startsWith('asset:');
+    const noPixelsInBoardFile = !diskText.includes('data:image');
+    const smallerThanThePicture = diskText.length < png.length / 4;
+    // the same picture twice must be the same name - stored once
+    const bothShareOneFile = onDisk.objects.find(o => o.id === 'pic-b').src === diskPic.src;
+
+    // --- 2. it comes back when the board is opened ---
+    await a.loadBoard(onDisk, { silent: true, noMigrationPrompt: true });
+    const back = a.store.get('pic-a');
+    const cameBackWhole = back && back.src === png;
+    const nothingMarkedMissing = !back.missing;
+
+    // --- 3. a board written the old way, with the picture inline, still opens ---
+    const legacy = { id: 'legacy-board', name: 'Old board', schema: 2, created: Date.now(),
+      modified: Date.now(), background: { pattern: 'none', color: '#ffffff' }, pages: [], page: null,
+      camera: null, objects: [{ id: 'old-pic', type: 'image', src: png, x: 0, y: 0, w: 400, h: 300, rotation: 0 }] };
+    await a.loadBoard(legacy, { silent: true, noMigrationPrompt: true });
+    const legacyOpened = a.store.get('old-pic').src === png;
+
+    // ...and converts the first time it is saved, without being asked to
+    await a.persist({ force: true });
+    const legacyOnDisk = await window.board.boards.load('legacy-board');
+    const legacyConverted = legacyOnDisk.objects[0].src.startsWith('asset:');
+    const legacyStillLoadsBack = (await window.board.assets.get(legacyOnDisk.objects[0].src.slice(6))) === png;
+
+    // --- 4. a reference whose file is gone ---
+    const orphan = { id: 'orphan-board', name: 'Orphan', schema: 2, created: Date.now(),
+      modified: Date.now(), background: { pattern: 'none', color: '#ffffff' }, pages: [], page: null,
+      camera: null, objects: [{ id: 'gone', type: 'image',
+        src: 'asset:' + '0'.repeat(64) + '.png', x: 0, y: 0, w: 200, h: 200, rotation: 0 }] };
+    await a.loadBoard(orphan, { silent: true, noMigrationPrompt: true });
+    const gone = a.store.get('gone');
+    const markedMissing = gone.missing === true;
+    const keptTheReference = gone.assetId === '0'.repeat(64) + '.png';
+    // and saving it again must not throw the reference away
+    await a.persist({ force: true });
+    const orphanOnDisk = await window.board.boards.load('orphan-board');
+    const referenceSurvivedResave = orphanOnDisk.objects[0].src === 'asset:' + '0'.repeat(64) + '.png';
+
+    // --- 5. the store only ever opens its own files ---
+    const traversalRefused = (await window.board.assets.get('../../../etc/passwd')) === null
+      && (await window.board.assets.get('..\\..\\windows\\win.ini')) === null
+      && (await window.board.assets.get('not-a-hash.png')) === null;
+
+    a.store.clear();
+    a.settings.autosave = true;          // leave the app as this test found it
+    return { wroteAReference, noPixelsInBoardFile, smallerThanThePicture, bothShareOneFile,
+             cameBackWhole, nothingMarkedMissing, legacyOpened, legacyConverted, legacyStillLoadsBack,
+             markedMissing, keptTheReference, referenceSurvivedResave, traversalRefused,
+             diskBytes: diskText.length, pictureBytes: png.length };
+  `);
+  check('a saved board holds a reference, not the picture itself',
+    assets.wroteAReference && assets.noPixelsInBoardFile && assets.smallerThanThePicture,
+    `board file ${assets.diskBytes} bytes for a ${assets.pictureBytes}-byte picture`);
+  check('the same picture used twice is stored once', assets.bothShareOneFile);
+  check('opening the board brings the picture back exactly',
+    assets.cameBackWhole && assets.nothingMarkedMissing);
+  check('a board saved the old way, with the picture inline, still opens', assets.legacyOpened);
+  check('and it converts the first time it is saved, losing nothing',
+    assets.legacyConverted && assets.legacyStillLoadsBack,
+    JSON.stringify({ converted: assets.legacyConverted, identical: assets.legacyStillLoadsBack }));
+  check('a picture whose file has gone leaves a marked gap, not a silent one',
+    assets.markedMissing && assets.keptTheReference);
+  check('and saving that board again does not throw the reference away',
+    assets.referenceSurvivedResave);
+  check('the asset store refuses to open anything but its own files',
+    assets.traversalRefused);
 
   /* ---- templates ---- */
   const tplCount = await js(`
@@ -1769,6 +2094,7 @@ async function run(win, app) {
     return { added: window.app.store.count - before, ok: !!r };
   `);
   check('PDF import adds pages', pdf.added === 3, pdf.added + ' pages');
+
 
   const docx = await js(`
     const { insertDocument } = await import('app://board/js/insert.js');

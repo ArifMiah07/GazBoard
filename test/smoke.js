@@ -266,16 +266,40 @@ async function run(win, app) {
     };
   `);
 
+  // A window resize settles asynchronously, and macOS takes far longer over it
+  // than X11 or Windows do - a flat sleep measured mid-resize there and made
+  // this read as a canvas bug. Poll until the surface has caught up with its
+  // own element instead. The assertion is unchanged: if it never catches up,
+  // the last sample is still recorded and still fails.
+  // Waiting for a resize is not the same as waiting a fixed time: the poll must
+  // not accept the size the window had a moment ago. Where the width that
+  // should arrive is known it is named, so a stale reading can never satisfy
+  // the wait; where it is not (maximise depends on the screen), the width has
+  // to hold still for three consecutive reads after a settling pause.
+  const settle = async (label, expectW) => {
+    await sleep(250);
+    let s = await fits(label), last = -1, held = 0;
+    for (let i = 0; i < 60; i++) {
+      held = s.w === last ? held + 1 : 0;
+      last = s.w;
+      const right = expectW === undefined ? held >= 2 : s.w === expectW;
+      if (right && s.elementFillsStage && s.bufferMatches && s.surfaceW === s.w) return s;
+      await sleep(50);
+      s = await fits(label);
+    }
+    return s;
+  };
+
   const sizes = [];
-  sizes.push(await fits('initial'));
-  win.setSize(1100, 780); await sleep(400); sizes.push(await fits('shrunk'));
-  win.setSize(1500, 950); await sleep(400); sizes.push(await fits('grown'));
-  win.maximize(); await sleep(600); sizes.push(await fits('maximised'));
-  win.unmaximize(); await sleep(600); sizes.push(await fits('restored'));
+  sizes.push(await settle('initial'));
+  win.setSize(1100, 780); sizes.push(await settle('shrunk', 1100));
+  win.setSize(1500, 950); sizes.push(await settle('grown', 1500));
+  win.maximize(); sizes.push(await settle('maximised'));
+  win.unmaximize(); sizes.push(await settle('restored', 1500));
   // a zoom-factor change moves devicePixelRatio without any window resize -
   // the same shape as a Windows display-scaling change
-  win.webContents.setZoomFactor(1.25); await sleep(500); sizes.push(await fits('dpr 1.25'));
-  win.webContents.setZoomFactor(1); await sleep(500); sizes.push(await fits('dpr back'));
+  win.webContents.setZoomFactor(1.25); sizes.push(await settle('dpr 1.25', 1200));
+  win.webContents.setZoomFactor(1); sizes.push(await settle('dpr back', 1500));
   win.setSize(1440, 900); await sleep(400);
 
   const bad = sizes.filter((s) => !s.elementFillsStage || !s.bufferMatches);
@@ -561,12 +585,35 @@ async function run(win, app) {
     for (const p of path.slice(1)) it.onMove(ev(p[0], p[1]));
 
     // snapshot the wet stroke as rendered, then lift and render again
-    const shot = () => { sf.draw(); return sf.ctx.getImageData(80 * sf.dpr, 240 * sf.dpr, 520 * sf.dpr, 140 * sf.dpr).data; };
+    const W = Math.round(520 * sf.dpr);
+    const shot = () => { sf.draw(); return sf.ctx.getImageData(80 * sf.dpr, 240 * sf.dpr, W, Math.round(140 * sf.dpr)).data; };
     const wetPoints = sf.wet.points.length;
     const before = shot();
     it.onUp(ev(path[path.length-1][0], path[path.length-1][1]));
     it.action = null; it.pointers.clear();
     const after = shot();
+
+    // Where the ink actually sits, measured from the pixels rather than from
+    // the model - this is what catches the stroke being re-shaped on lift.
+    // A rasteriser that anti-aliases differently moves neither the outline nor
+    // the centre of mass; smoothing, straightening or resampling moves both.
+    const inkStats = (d) => {
+      let x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1, sx = 0, sy = 0, n = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i] > 200) continue;              // background is white
+        const px = i / 4, x = px % W, y = (px - x) / W;
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+        sx += x; sy += y; n++;
+      }
+      return { x0, y0, x1, y1, cx: n ? sx / n : 0, cy: n ? sy / n : 0, n };
+    };
+    const A = inkStats(before), B = inkStats(after);
+    const edgeShift = Math.max(Math.abs(A.x0 - B.x0), Math.abs(A.y0 - B.y0),
+                               Math.abs(A.x1 - B.x1), Math.abs(A.y1 - B.y1));
+    const centreShift = Math.hypot(A.cx - B.cx, A.cy - B.cy);
 
     let diff = 0;
     for (let i = 0; i < before.length; i += 4) if (Math.abs(before[i] - after[i]) > 24) diff++;
@@ -574,14 +621,24 @@ async function run(win, app) {
 
     a.settings.inkWithMouse = 'auto'; a.setTool('select'); a.store.clear();
     return { wetPoints, storedPoints: s.points.length, changedPixels: diff,
-             total: before.length / 4 };
+             total: before.length / 4, edgeShift, centreShift,
+             inkBefore: A.n, inkAfter: B.n, dpr: sf.dpr };
   `);
   check('lifting the pen keeps every point', fidelity.storedPoints === fidelity.wetPoints,
     `${fidelity.wetPoints} while drawing, ${fidelity.storedPoints} after`);
   // The stroke you were watching must not be redrawn differently when you lift.
+  // Measured as geometry, so it means the same thing on every rasteriser.
   check('the stroke does not change shape when you lift',
-    fidelity.changedPixels < fidelity.total * 0.002,
-    `${fidelity.changedPixels} of ${fidelity.total} pixels differ`);
+    fidelity.edgeShift <= 1 && fidelity.centreShift <= 0.5,
+    `outline moved ${fidelity.edgeShift}px, centre of mass ${fidelity.centreShift.toFixed(3)}px`);
+  // Belt and braces on top of the geometry check. macOS anti-aliases the ink
+  // noticeably differently from Skia's software raster on X11 and Windows -
+  // about 0.5% of the sampled box against 0.01% on Linux, all of it on the
+  // edges of the stroke - so the tolerance here is set by the rasteriser, not
+  // by how much the drawing is allowed to move.
+  check('and it is redrawn essentially pixel-for-pixel',
+    fidelity.changedPixels < fidelity.total * 0.01,
+    `${fidelity.changedPixels} of ${fidelity.total} pixels differ, ${fidelity.inkBefore} -> ${fidelity.inkAfter} ink pixels`);
 
   const misfire = await js(`
     const { recognize, fitError, MAX_FIT_ERROR } = await import('app://board/js/core/recognize.js');

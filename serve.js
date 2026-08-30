@@ -36,8 +36,6 @@ const MIME = {
 
 // Files served from web/ at the origin root so a SW based there can control the app.
   const VIRTUALS = {
-    '/sw.js': path.join(SRC, 'web', 'sw.js'),
-    '/manifest.webmanifest': path.join(SRC, 'web', 'manifest.webmanifest'),
     '/test/web-driver.html': path.join(__dirname, 'test', 'web-driver.html'),
     '/test/pdfrepro.html': path.join(__dirname, 'test', 'pdfrepro.html')
   };

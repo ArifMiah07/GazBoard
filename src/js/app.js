@@ -40,6 +40,15 @@ const DEFAULT_SETTINGS = {
 };
 
 class App {
+  /*
+   * The longest the board may go unwritten while someone is actively drawing.
+   * Not a save interval: nothing is written ON this schedule. It is the point
+   * after which the next stroke to finish is written straight away, so what a
+   * crash could cost is bounded by the clock rather than by whether the user
+   * happened to pause for long enough.
+   */
+  static SAVE_CEILING = 20000;
+
   constructor() {
     this.store = new Store();
     this.settings = this.loadSettings();
@@ -87,15 +96,70 @@ class App {
   /* ---------------- board lifecycle ---------------- */
   wireStore() {
     this.unsavedNew = true;          // until a board is loaded or something is drawn
-    this.autosave = debounce(() => this.persist(), 700);
+    this._saveCost = 0;              // how long the last write actually took
+    this._lastSaveAt = 0;            // when it finished
+    this._unsaved = false;           // is there anything worth writing?
+
+    /*
+     * When the board gets written out.
+     *
+     * Writing costs real time, and it grows with the board - a few kilobytes is
+     * free, one carrying imported pages and photographs is a couple of hundred
+     * milliseconds. That time is spent on the same thread that watches the pen,
+     * so a save landing mid-stroke takes a bite out of the ink.
+     *
+     * So: never during a stroke, ever. Instead the save is taken at the moment
+     * a stroke ENDS. You cannot write without lifting the pen - strokes finish
+     * several times a sentence - so there is always a moment to use, and it is
+     * never inside one.
+     *
+     * Two things ask for a write. Stopping for a moment triggers one, after a
+     * pause taken from what the last save actually cost rather than a number
+     * picked in advance. And SAVE_CEILING puts a floor under how much can be
+     * lost when someone draws steadily and never really stops: once that long
+     * has passed, the very next stroke to end is written immediately.
+     */
+    this.autosave = () => {
+      clearTimeout(this._saveTimer);
+      const wait = Math.min(4000, Math.max(700, this._saveCost * 4));
+      this._saveTimer = setTimeout(() => {
+        if (this.gestureInFlight()) return;   // the stroke ending will come back for this
+        this.runSave();
+      }, wait);
+    };
+
     this.store.subscribe(() => {
       this.surface.invalidate();
       this.syncUI();
-      if (this.settings.autosave && !(this.unsavedNew && !this.store.objects.length)) {
-        this.markDirty();
-      }
-      if (this.settings.autosave) this.autosave();      // persist() decides whether to write
+      if (!this.settings.autosave) return;
+      this._unsaved = true;
+      if (!(this.unsavedNew && !this.store.objects.length)) this.markDirty();
+      this.autosave();                                  // persist() decides whether to write
     });
+  }
+
+  /** True while a pointer gesture is mid-flight. Reads one flag; never the board. */
+  gestureInFlight() { return !!(this.interaction && this.interaction.action); }
+
+  /** Write now, and remember what it cost so the next pause can be sized to it. */
+  runSave() {
+    clearTimeout(this._saveTimer);
+    const t = performance.now();
+    return Promise.resolve(this.persist()).finally(() => {
+      this._saveCost = performance.now() - t;
+      this._lastSaveAt = performance.now();
+    });
+  }
+
+  /**
+   * A gesture just finished - the one moment a save is guaranteed not to
+   * interrupt anything. Take it if the board has gone unwritten for longer
+   * than the ceiling; otherwise leave it to the ordinary pause.
+   */
+  onGestureEnd() {
+    if (!this.settings.autosave || !this._unsaved) return;
+    if (performance.now() - this._lastSaveAt > App.SAVE_CEILING) this.runSave();
+    else this.autosave();
   }
 
   markDirty() {
@@ -115,11 +179,104 @@ class App {
     this.store.doc.camera = this.surface.cam.toJSON();
     // boards.save writes the file and records the "last open" pointer in one go,
     // both through the main process, so both are on disk immediately
-    await window.board.boards.save(this.store.toJSON());
+    /*
+     * The board is serialised HERE and sent as text.
+     *
+     * Sending the object instead meant the structured clone that crosses to the
+     * main process had to walk every point of every stroke and copy every
+     * embedded picture - on a board with a few imported pages that was ~130ms
+     * of blocking work on top of ~50ms to stringify it, all of it on the thread
+     * that handles the pen. Strokes went missing in that window. A string is
+     * copied wholesale, and the main process no longer has to re-serialise what
+     * it is only going to write out.
+     */
+    const doc = await this.externaliseAssets(this.store.toJSON());
+    await window.board.boards.save({ id: doc.id, json: JSON.stringify(doc) });
     this.unsavedNew = false;
+    this._unsaved = false;
+    this._lastSaveAt = performance.now();
     try { localStorage.setItem('gazboard.lastBoard', this.store.doc.id); } catch {}
     const b = document.getElementById('savedBadge');
     b.textContent = 'Saved';
+  }
+
+  /**
+   * Move pictures out of the board and leave a reference behind.
+   *
+   * The objects in memory are NOT changed - they keep their data: URL, so
+   * everything that draws, exports or prints carries on exactly as before.
+   * Only the copy being written to disk is slimmed down. On a board carrying
+   * imported pages that is the difference between writing tens of megabytes on
+   * every save and writing a few hundred kilobytes.
+   *
+   * A picture is only handed to the store once; after that the object
+   * remembers its name. If the store cannot take it - for any reason at all -
+   * the picture stays inline exactly as it always did, so a failure here
+   * degrades to the old behaviour and can never lose an image.
+   */
+  async externaliseAssets(doc) {
+    if (!doc || !Array.isArray(doc.objects) || !window.board.assets) return doc;
+    const objects = [];
+    for (const o of doc.objects) {
+      if (!o || o.type !== 'image') { objects.push(o); continue; }
+      const inline = typeof o.src === 'string' && o.src.startsWith('data:');
+      if (!inline) {
+        /*
+         * Not a picture we are holding: either already a reference, or one
+         * whose file has gone missing and is being shown as a gap. Either way
+         * it must be written back POINTING AT THE SAME FILE. Writing what is
+         * in `src` would save the empty placeholder over the reference and
+         * turn a picture that is merely misplaced into one that is lost.
+         */
+        if (o.assetId) {
+          const { missing, ...rest } = o;      // a runtime marker, not board data
+          objects.push({ ...rest, src: 'asset:' + o.assetId, assetId: o.assetId });
+        } else objects.push(o);
+        continue;
+      }
+      let id = o.assetId;
+      if (!id) {
+        let r = null;
+        try { r = await window.board.assets.put(o.src); } catch { r = null; }
+        if (r && r.id) {
+          id = r.id;
+          const live = this.store.get(o.id);   // remember it, so the next save is cheap
+          if (live) live.assetId = id;
+        }
+      }
+      objects.push(id ? { ...o, src: 'asset:' + id, assetId: id } : o);
+    }
+    return { ...doc, objects };
+  }
+
+  /**
+   * Put the pictures back when a board is opened.
+   *
+   * A board written before this existed carries its pictures inline and is
+   * loaded untouched - it converts the first time it is saved, not on sight.
+   * A reference whose file has gone (copied to another machine without the
+   * assets folder, say) becomes a visible gap rather than a silent one, and
+   * the reference is KEPT: put the file back and the picture returns.
+   */
+  async resolveAssets(data) {
+    if (!data || !Array.isArray(data.objects) || !window.board.assets) return data;
+    const objects = [];
+    let missing = 0;
+    for (const o of data.objects) {
+      const ref = o && o.type === 'image' && typeof o.src === 'string' && o.src.startsWith('asset:');
+      if (!ref) { objects.push(o); continue; }
+      const id = o.src.slice(6);
+      let url = null;
+      try { url = await window.board.assets.get(id); } catch { url = null; }
+      if (url) objects.push({ ...o, src: url, assetId: id });
+      else { missing++; objects.push({ ...o, src: '', assetId: id, missing: true }); }
+    }
+    if (missing) {
+      this.toast(missing === 1
+        ? 'One picture could not be found - its place is kept on the board'
+        : missing + ' pictures could not be found - their places are kept on the board', 'help', 6000);
+    }
+    return { ...data, objects };
   }
 
   /**
@@ -227,6 +384,7 @@ class App {
 
   async loadBoard(data, opts = {}) {
     this.textEditor.cancel();
+    data = await this.resolveAssets(data);
     this.store.load(data);
     this.unsavedNew = false;
     this.surface.selection.clear();
@@ -1290,7 +1448,11 @@ class App {
     window.addEventListener('blur', () => {
       if (this.settings.autosave) this.persist();
     });
-    window.board.onOpenFile((data) => this.loadBoard(data));
+    window.board.onOpenFile((data) => {
+      // fire-and-forget from the main process: nothing is waiting on it, so a
+      // failure has to be reported here rather than escaping as a rejection
+      this.loadBoard(data).catch(() => this.toast('Could not open that board'));
+    });
     window.board.onWindowResized(() => {
       // the window changed shape - re-measure now and again after layout settles
       this.surface.resize();

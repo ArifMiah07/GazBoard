@@ -23,6 +23,13 @@ contextBridge.exposeInMainWorld('board', {
     migrate: () => ipcRenderer.invoke('boards:migrate')
   },
 
+  // Pictures and imported pages: stored once, by content, outside the board file.
+  assets: {
+    put: (dataUrl) => ipcRenderer.invoke('assets:put', dataUrl),
+    get: (id) => ipcRenderer.invoke('assets:get', id),
+    have: (ids) => ipcRenderer.invoke('assets:have', ids)
+  },
+
   importToPdf: (filePath) => ipcRenderer.invoke('import:toPdf', filePath),
   exportPdf: (payload) => ipcRenderer.invoke('export:pdf', payload),
 

@@ -33,6 +33,8 @@ export class Interaction {
     this.lastMotion = null;     // last pointer position of the primary gesture
     this.actionId = null;       // the pointer that owns the gesture in flight
     this._penAt = 0;            // when the stylus was last heard from
+    this._wheelFrom = null;     // 'mouse' or 'trackpad', for the stream in flight
+    this._wheelAt = 0;
     this._penSp = null;         // and where it was, in screen coordinates
     this._edgeRaf = null;
     this.rightPan = null;       // an in-flight right-button drag
@@ -966,6 +968,40 @@ export class Interaction {
     this.canvas.style.cursor = cursor;
   }
 
+  /**
+   * Which device sent this wheel event: 'mouse' or 'trackpad'.
+   *
+   * This used to be guessed from how BIG the movement was - under 40 counted
+   * as a trackpad, anything more as a mouse wheel. A gentle two-finger scroll
+   * is small, so that appeared to work; a hard flick is not, so it sailed past
+   * the threshold and zoomed the board instead of scrolling it. Flicking up
+   * zoomed out, flicking down zoomed in - the opposite of what the hand did.
+   *
+   * How hard you flick says nothing about what you are flicking. A mouse wheel
+   * turns in notches, so it arrives in whole multiples of 120 with no sideways
+   * component, or in line and page units. A trackpad sends a continuous
+   * stream, usually fractional and rarely perfectly vertical.
+   *
+   * A flick is then followed by momentum events the system invents, and those
+   * can look like anything at all - so once a stream has been recognised, the
+   * rest of it is treated the same way. A new gesture starts after a pause.
+   */
+  wheelDevice(e) {
+    const now = performance.now();
+    const sameGesture = this._wheelFrom && now - (this._wheelAt || 0) < 350;
+    this._wheelAt = now;
+    if (sameGesture) return this._wheelFrom;
+
+    const dy = e.deltaY || 0;
+    const dx = e.deltaX || 0;
+    // the legacy value is the reliable one: a notch is always +/-120
+    const notch = typeof e.wheelDeltaY === 'number' ? Math.abs(e.wheelDeltaY) : null;
+    const notched = e.deltaMode !== 0
+      || (dx === 0 && notch !== null && notch !== 0 && notch % 120 === 0 && Number.isInteger(dy));
+    this._wheelFrom = notched ? 'mouse' : 'trackpad';
+    return this._wheelFrom;
+  }
+
   onWheel(e) {
     e.preventDefault();
     const sp = this.surface.screenPoint(e);
@@ -987,11 +1023,10 @@ export class Interaction {
       this.surface.cam.zoomAt(sp.x, sp.y, Math.exp(-e.deltaY * 0.0022));
     } else if (e.shiftKey) {
       this.surface.cam.panBy(-e.deltaY, 0);
+    } else if (this.wheelDevice(e) === 'trackpad' && !this.app.settings.wheelZoom) {
+      this.surface.cam.panBy(-e.deltaX, -e.deltaY);
     } else {
-      // trackpads send small deltas: treat as pan, mouse wheels as zoom
-      const isTrackpad = Math.abs(e.deltaY) < 40 && e.deltaMode === 0;
-      if (isTrackpad && !this.app.settings.wheelZoom) this.surface.cam.panBy(-e.deltaX, -e.deltaY);
-      else this.surface.cam.zoomAt(sp.x, sp.y, Math.exp(-e.deltaY * 0.0018));
+      this.surface.cam.zoomAt(sp.x, sp.y, Math.exp(-e.deltaY * 0.0018));
     }
     this.surface.clampCamera();
     this.app.syncZoom();

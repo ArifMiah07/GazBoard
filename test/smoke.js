@@ -2065,6 +2065,60 @@ async function run(win, app) {
   check('the asset store refuses to open anything but its own files',
     assets.traversalRefused);
 
+  /* ---- what the wheel is coming from ---- */
+  const wheel = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    a.newBoard(true); a.settings.wheelZoom = false;
+    const rect = sf.canvas.getBoundingClientRect();
+    const mk = (o) => Object.assign({ deltaMode: 0, deltaX: 0, deltaY: 0, ctrlKey: false,
+      metaKey: false, shiftKey: false, clientX: rect.left + 400, clientY: rect.top + 300,
+      preventDefault() {} }, o);
+
+    const run = (events, gap) => {
+      it._wheelFrom = null; it._wheelAt = 0;
+      sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+      for (const ev of events) it.onWheel(mk(ev));
+      return { z: +sf.cam.z.toFixed(4), y: Math.round(sf.cam.y) };
+    };
+
+    // a gentle two-finger scroll: fractional, slightly diagonal
+    const gentle = run([{ deltaY: 4.5, deltaX: 0.3, wheelDeltaY: -13 },
+                        { deltaY: 6.2, deltaX: 0.4, wheelDeltaY: -18 }]);
+
+    // a HARD flick: the same device, moving fast, then macOS momentum
+    const flick = run([{ deltaY: 12.7, deltaX: 1.1, wheelDeltaY: -38 },
+                       { deltaY: 96, deltaX: 3, wheelDeltaY: -288 },
+                       { deltaY: 240, deltaX: 0, wheelDeltaY: -720 },
+                       { deltaY: 120, deltaX: 0, wheelDeltaY: -360 },
+                       { deltaY: 40, deltaX: 0, wheelDeltaY: -120 }]);
+
+    // a mouse wheel notch, and several of them
+    const notch = run([{ deltaY: 100, deltaX: 0, wheelDeltaY: -120 }]);
+    const notches = run([{ deltaY: 100, deltaX: 0, wheelDeltaY: -120 },
+                         { deltaY: 100, deltaX: 0, wheelDeltaY: -120 }]);
+    // a wheel reporting in lines rather than pixels
+    const lines = run([{ deltaY: 3, deltaX: 0, deltaMode: 1, wheelDeltaY: -120 }]);
+
+    // pinch arrives as a wheel with ctrl held - that must still zoom
+    const pinch = run([{ deltaY: -18.5, ctrlKey: true, wheelDeltaY: 55 }]);
+
+    a.store.clear();
+    return { gentle, flick, notch, notches, lines, pinch };
+  `);
+  check('a gentle two-finger scroll moves the board, not the zoom',
+    wheel.gentle.z === 1 && wheel.gentle.y !== 0, JSON.stringify(wheel.gentle));
+  check('and a hard flick does the same thing, only further',
+    wheel.flick.z === 1 && Math.abs(wheel.flick.y) > Math.abs(wheel.gentle.y),
+    JSON.stringify(wheel.flick));
+  // zoomAt keeps the point under the cursor fixed, so the camera moves as a
+  // consequence of zooming - the zoom level is what says a zoom happened
+  check('a mouse wheel notch still zooms',
+    wheel.notch.z !== 1, JSON.stringify(wheel.notch));
+  check('and keeps zooming, notch after notch',
+    wheel.notches.z !== 1 && wheel.notches.z !== wheel.notch.z, JSON.stringify(wheel.notches));
+  check('a wheel that reports in lines zooms too', wheel.lines.z !== 1, JSON.stringify(wheel.lines));
+  check('a trackpad pinch still zooms', wheel.pinch.z !== 1, JSON.stringify(wheel.pinch));
+
   /* ---- templates ---- */
   const tplCount = await js(`
     const { TEMPLATES } = await import('app://board/js/templates.js');
